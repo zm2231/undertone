@@ -4,6 +4,7 @@
 
 **On-device audio transcripts that capture the words and how they were said.**
 
+[![PyPI](https://img.shields.io/pypi/v/undertone-audio?logo=pypi&logoColor=white&color=3775A9)](https://pypi.org/project/undertone-audio/)
 ![Python](https://img.shields.io/badge/python-3.11+-3776AB?logo=python&logoColor=white)
 ![Platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-000000?logo=apple&logoColor=white)
 ![License](https://img.shields.io/badge/license-Apache--2.0-D22128)
@@ -73,17 +74,25 @@ FluidAudio downloads model assets from Hugging Face on first run. Upstream honor
 
 ### 2. Install Undertone
 
+From [PyPI](https://pypi.org/project/undertone-audio/):
+
 ```bash
-pip install -e .
+pip install undertone-audio
 ```
 
 Optional extras:
 
 ```bash
-pip install -e '.[voice]'                # Parselmouth acoustic metrics
-pip install -e '.[meet]'                 # Google Meet auth helpers
-pip install -e '.[connectors]'           # YouTube connector via yt-dlp
-pip install -e '.[dev]'                  # pytest
+pip install 'undertone-audio[voice]'       # Parselmouth acoustic metrics
+pip install 'undertone-audio[meet]'        # Google Meet auth helpers
+pip install 'undertone-audio[connectors]'  # YouTube connector via yt-dlp
+pip install 'undertone-audio[voice,meet,connectors]'
+```
+
+Or from source, for development:
+
+```bash
+pip install -e '.[dev]'
 pip install -e '.[dev,voice,meet,connectors]'
 ```
 
