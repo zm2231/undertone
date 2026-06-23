@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+*.db
+.tmp-*/
+.leann/
+
+# Local migration guidance and scratch outputs.
+skills/undertone-migration/
+migration/
+migrations-local/
+*.migration.json
+*.migration.jsonl

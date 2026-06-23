@@ -1,0 +1,44 @@
+[project]
+name = "undertone-audio"
+version = "0.1.0"
+description = "Local audio transcript producer: FluidAudio engines, diarization cleanup, speaker fingerprints, schema, store, and readiness webhooks."
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.6",
+  "requests>=2.31",
+]
+
+[project.scripts]
+undertone = "undertone_audio.cli:main"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "build>=1.2",
+]
+voice = [
+  "numpy>=1.26",
+  "praat-parselmouth>=0.4",
+  "soundfile>=0.12",
+]
+meet = [
+  "google-auth>=2.0",
+]
+connectors = [
+  "yt-dlp>=2024.8.6",
+]
+youtube = [
+  "yt-dlp>=2024.8.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
