@@ -6,7 +6,7 @@ from undertone_audio.cli import main
 from undertone_audio.engines.base import RawTranscript
 from undertone_audio.schema import Segment, Speaker
 from undertone_audio.sources.meet import MEET_ADC_COMMAND
-from undertone_audio.sources.meet import MeetAudioSelection, MeetSource
+from undertone_audio.sources.meet import MeetSource
 from undertone_audio.sources.quill import QuillSource
 
 

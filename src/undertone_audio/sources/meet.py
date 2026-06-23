@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 import subprocess
 from dataclasses import dataclass
@@ -159,7 +158,7 @@ def meet_auth_check(
     try:
         import google.auth
         import google.auth.transport.requests
-    except ImportError as exc:
+    except ImportError:
         return {
             "ok": False,
             "error": "Google auth dependencies are not installed.",

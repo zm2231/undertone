@@ -5,6 +5,7 @@
 **On-device audio transcripts that capture the words and how they were said.**
 
 [![PyPI](https://img.shields.io/pypi/v/undertone-audio?logo=pypi&logoColor=white&color=3775A9)](https://pypi.org/project/undertone-audio/)
+[![CI](https://github.com/zm2231/undertone/actions/workflows/ci.yml/badge.svg)](https://github.com/zm2231/undertone/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11+-3776AB?logo=python&logoColor=white)
 ![Platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-000000?logo=apple&logoColor=white)
 ![License](https://img.shields.io/badge/license-Apache--2.0-D22128)
