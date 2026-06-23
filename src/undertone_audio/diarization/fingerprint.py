@@ -11,6 +11,10 @@ from undertone_audio.schema import Speaker
 log = logging.getLogger(__name__)
 
 DEFAULT_SIMILARITY_THRESHOLD = 0.78
+MARGIN_SIMILARITY_THRESHOLD = 0.62
+MARGIN_DELTA = 0.15
+MIN_ENROLL_DURATION_MS = 15_000
+MIN_UPDATE_DURATION_MS = 3_000
 
 
 def _vec_to_blob(vector: list[float]) -> bytes:
@@ -49,7 +53,15 @@ class SpeakerFingerprintStore:
         self,
         speakers: list[Speaker],
         persist: bool = True,
+        speaker_durations_ms: dict[str, int] | None = None,
     ) -> tuple[list[Speaker], "FingerprintAssignmentPlan"]:
+        """Match speakers to stored voice fingerprints.
+
+        ``speaker_durations_ms`` maps ``speaker_id`` to total talk time in this
+        recording and drives the quality gates. When a duration is unknown the
+        gates are skipped for that speaker (margin matching still applies).
+        """
+        durations = speaker_durations_ms or {}
         with self._conn() as conn:
             stored = [
                 (
@@ -92,15 +104,32 @@ class SpeakerFingerprintStore:
             best_id = None
             best_similarity = 0.0
             best_name = None
+            second_similarity = 0.0
             for fingerprint_id, vector, _count, display_name in stored:
                 similarity = _cosine(speaker.embedding, vector)
                 if similarity > best_similarity:
+                    second_similarity = best_similarity
                     best_id = fingerprint_id
                     best_similarity = similarity
                     best_name = display_name
+                elif similarity > second_similarity:
+                    second_similarity = similarity
 
-            if best_id and best_similarity >= self.similarity_threshold:
-                plan.matches.append((best_id, list(speaker.embedding)))
+            duration_ms = durations.get(speaker.speaker_id)
+            strong_match = best_id is not None and best_similarity >= self.similarity_threshold
+            margin_match = (
+                best_id is not None
+                and best_similarity >= MARGIN_SIMILARITY_THRESHOLD
+                and (best_similarity - second_similarity) >= MARGIN_DELTA
+            )
+
+            if strong_match or margin_match:
+                # Anti-drift: only fold a sample into the stored centroid when it is
+                # a strong match AND long enough. A margin (cross-channel) match gets
+                # the label but never pollutes the canonical print.
+                long_enough = duration_ms is None or duration_ms >= MIN_UPDATE_DURATION_MS
+                if strong_match and long_enough:
+                    plan.matches.append((best_id, list(speaker.embedding)))
                 updated.append(
                     speaker.model_copy(
                         update={
@@ -110,22 +139,40 @@ class SpeakerFingerprintStore:
                     )
                 )
                 log.info(
-                    "matched %s -> %s (sim=%.3f)",
+                    "matched %s -> %s (sim=%.3f, 2nd=%.3f, %s%s)",
                     speaker.speaker_id,
                     best_id,
                     best_similarity,
+                    second_similarity,
+                    "strong" if strong_match else "margin",
+                    "" if (strong_match and long_enough) else ", no-fold",
                 )
-            else:
-                fingerprint_id = self._mint_fingerprint(speaker.embedding)
-                plan.inserts.append((fingerprint_id, list(speaker.embedding), speaker.display_name))
-                updated.append(speaker.model_copy(update={"fingerprint_id": fingerprint_id}))
-                stored.append((fingerprint_id, list(speaker.embedding), 1, speaker.display_name))
+                continue
+
+            # No acceptable match. Quality gate: do not mint a durable identity from
+            # too little signal (the garbage-magnet source). Leave such speakers
+            # unassigned rather than creating a junk fingerprint.
+            if duration_ms is not None and duration_ms < MIN_ENROLL_DURATION_MS:
+                updated.append(speaker)
                 log.info(
-                    "new fingerprint %s for %s (best existing sim=%.3f)",
-                    fingerprint_id,
+                    "no-enroll %s (talk=%dms < %dms, best existing sim=%.3f)",
                     speaker.speaker_id,
+                    duration_ms,
+                    MIN_ENROLL_DURATION_MS,
                     best_similarity,
                 )
+                continue
+
+            fingerprint_id = self._mint_fingerprint(speaker.embedding)
+            plan.inserts.append((fingerprint_id, list(speaker.embedding), speaker.display_name))
+            updated.append(speaker.model_copy(update={"fingerprint_id": fingerprint_id}))
+            stored.append((fingerprint_id, list(speaker.embedding), 1, speaker.display_name))
+            log.info(
+                "new fingerprint %s for %s (best existing sim=%.3f)",
+                fingerprint_id,
+                speaker.speaker_id,
+                best_similarity,
+            )
 
         if persist:
             plan.commit()

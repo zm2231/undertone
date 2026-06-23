@@ -178,13 +178,19 @@ def test_quill_list_cli_reports_audio_candidates(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr("undertone_audio.commands.sources.QuillSource", FakeQuillSource)
 
-    assert main(["quill-list", "--limit", "1", "--json"]) == 0
+    db = tmp_path / "quill.db"
+    db.write_bytes(b"")
+    meetings_dir = tmp_path / "meetings"
+    meetings_dir.mkdir()
+    base = ["--quill-db", str(db), "--meetings-dir", str(meetings_dir)]
+
+    assert main(["quill-list", *base, "--limit", "1", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert payload[0]["meeting_id"] == "m1"
     assert payload[0]["ingestable"] is True
 
-    assert main(["quill-list", "--limit", "1"]) == 0
+    assert main(["quill-list", *base, "--limit", "1"]) == 0
     assert "Quill meetings" in capsys.readouterr().out
 
 

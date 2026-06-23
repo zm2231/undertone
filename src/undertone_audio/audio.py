@@ -53,7 +53,6 @@ class AudioPreprocessor:
         self.target_sr = target_sr
         self.target_channels = target_channels
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self._verify_ffmpeg()
 
     @staticmethod
     def _verify_ffmpeg() -> None:
@@ -63,6 +62,7 @@ class AudioPreprocessor:
             raise RuntimeError("ffprobe not found on PATH. It ships with ffmpeg.")
 
     def probe(self, audio_path: Path) -> AudioInfo:
+        self._verify_ffmpeg()
         cmd = [
             "ffprobe",
             "-v",
@@ -95,6 +95,7 @@ class AudioPreprocessor:
         )
 
     def normalize(self, audio_path: Path) -> Path:
+        self._verify_ffmpeg()
         audio_path = Path(audio_path)
         if not audio_path.exists():
             raise ValueError(f"audio file not found: {audio_path}")
@@ -133,6 +134,7 @@ class AudioPreprocessor:
         return out_path
 
     def mix_to_wav(self, audio_paths: list[Path], label: str) -> Path:
+        self._verify_ffmpeg()
         if not audio_paths:
             raise ValueError("audio_paths must not be empty")
         normalized = [self.normalize(path) for path in audio_paths]
