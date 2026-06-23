@@ -1,12 +1,46 @@
 [project]
 name = "undertone-audio"
 version = "0.1.0"
-description = "Local audio transcript producer: FluidAudio engines, diarization cleanup, speaker fingerprints, schema, store, and readiness webhooks."
+description = "On-device audio transcripts that capture the words and how they were said."
+readme = "README.md"
 requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Zain Merchant" }]
+keywords = [
+  "transcription",
+  "diarization",
+  "speaker-diarization",
+  "asr",
+  "speech-to-text",
+  "audio",
+  "paralinguistics",
+  "fluidaudio",
+  "on-device",
+  "apple-silicon",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: MacOS X",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Operating System :: MacOS :: MacOS X",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Multimedia :: Sound/Audio :: Speech",
+  "Topic :: Scientific/Engineering",
+]
 dependencies = [
   "pydantic>=2.6",
   "requests>=2.31",
 ]
+
+[project.urls]
+Homepage = "https://github.com/zm2231/undertone"
+Repository = "https://github.com/zm2231/undertone"
+Issues = "https://github.com/zm2231/undertone/issues"
 
 [project.scripts]
 undertone = "undertone_audio.cli:main"
@@ -34,6 +68,12 @@ youtube = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/undertone_audio"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "README.md", "LICENSE", "pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
