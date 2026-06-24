@@ -14,7 +14,7 @@ def test_youtube_connector_uses_yt_dlp_args_without_shell(monkeypatch, tmp_path)
     monkeypatch.setattr("undertone_audio.connectors.youtube.ensure_binary", lambda binary: binary)
     monkeypatch.setattr(
         "undertone_audio.connectors.youtube.run_json",
-        lambda cmd: {
+        lambda cmd, **kwargs: {
             "id": "abc123",
             "title": "Interview",
             "webpage_url": "https://youtu.be/abc123",
@@ -23,9 +23,10 @@ def test_youtube_connector_uses_yt_dlp_args_without_shell(monkeypatch, tmp_path)
         },
     )
 
-    def fake_run_checked(cmd):
+    def fake_run_checked(cmd, **kwargs):
         commands.append(cmd)
-        (tmp_path / "abc123.wav").write_bytes(b"audio")
+        download_dir = Path(cmd[cmd.index("--paths") + 1])
+        (download_dir / "abc123.wav").write_bytes(b"audio")
 
     monkeypatch.setattr("undertone_audio.connectors.youtube.run_checked", fake_run_checked)
 
@@ -36,6 +37,55 @@ def test_youtube_connector_uses_yt_dlp_args_without_shell(monkeypatch, tmp_path)
     assert asset.metadata["audio_priority"] == "downloaded-youtube-audio"
     assert commands[0][0] == "yt-dlp"
     assert "https://youtu.be/abc123" in commands[0]
+
+
+def test_youtube_connector_does_not_publish_failed_download(monkeypatch, tmp_path):
+    monkeypatch.setattr("undertone_audio.connectors.youtube.ensure_binary", lambda binary: binary)
+    monkeypatch.setattr(
+        "undertone_audio.connectors.youtube.run_json",
+        lambda cmd, **kwargs: {"id": "abc123", "title": "Interview"},
+    )
+
+    def fake_run_checked(cmd, **kwargs):
+        download_dir = Path(cmd[cmd.index("--paths") + 1])
+        (download_dir / "abc123.wav").write_bytes(b"partial")
+        raise RuntimeError("network dropped")
+
+    monkeypatch.setattr("undertone_audio.connectors.youtube.run_checked", fake_run_checked)
+
+    try:
+        YouTubeConnector(download_dir=tmp_path).fetch("https://youtu.be/abc123")
+    except RuntimeError as exc:
+        assert "network dropped" in str(exc)
+    else:
+        raise AssertionError("fetch should fail")
+
+    assert not (tmp_path / "abc123.wav").exists()
+    assert not list(tmp_path.glob(".abc123.*"))
+
+
+def test_youtube_connector_rejects_empty_download(monkeypatch, tmp_path):
+    monkeypatch.setattr("undertone_audio.connectors.youtube.ensure_binary", lambda binary: binary)
+    monkeypatch.setattr(
+        "undertone_audio.connectors.youtube.run_json",
+        lambda cmd, **kwargs: {"id": "abc123", "title": "Interview"},
+    )
+
+    def fake_run_checked(cmd, **kwargs):
+        download_dir = Path(cmd[cmd.index("--paths") + 1])
+        (download_dir / "abc123.wav").write_bytes(b"")
+
+    monkeypatch.setattr("undertone_audio.connectors.youtube.run_checked", fake_run_checked)
+
+    try:
+        YouTubeConnector(download_dir=tmp_path).fetch("https://youtu.be/abc123")
+    except RuntimeError as exc:
+        assert "empty audio file" in str(exc)
+    else:
+        raise AssertionError("fetch should fail")
+
+    assert not (tmp_path / "abc123.wav").exists()
+    assert not list(tmp_path.glob(".abc123.*"))
 
 
 def test_podcast_connector_lists_and_downloads_local_feed(tmp_path):
@@ -65,6 +115,34 @@ def test_podcast_connector_lists_and_downloads_local_feed(tmp_path):
     assert asset.audio_path.read_bytes() == b"audio"
     assert asset.transcript_id_hint == "podcast-ep-1"
     assert asset.metadata["audio_priority"] == "downloaded-podcast-audio"
+
+
+def test_podcast_connector_removes_partial_download(monkeypatch, tmp_path):
+    class FailingResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, _size=-1):
+            raise OSError("network dropped")
+
+    monkeypatch.setattr(
+        "undertone_audio.connectors.podcast.urllib.request.urlopen",
+        lambda *args, **kwargs: FailingResponse(),
+    )
+
+    connector = PodcastConnector(download_dir=tmp_path)
+    try:
+        connector.fetch("https://example.com/episode.mp3")
+    except OSError as exc:
+        assert "network dropped" in str(exc)
+    else:
+        raise AssertionError("fetch should fail")
+
+    assert not list(tmp_path.glob("*.mp3"))
+    assert not list(tmp_path.glob(".*.tmp"))
 
 
 def test_podcast_list_cli(tmp_path, capsys):
@@ -143,6 +221,45 @@ def test_youtube_ingest_cli_reruns_local_audio_pipeline(tmp_path, monkeypatch, c
     assert payload["transcript_id"] == "youtube-abc"
     assert payload["metadata"]["source_url"] == "https://youtu.be/abc"
     assert payload["metadata"]["source_metadata"]["audio_priority"] == "downloaded-youtube-audio"
+
+
+def test_youtube_dry_run_passes_cli_process_timeout(monkeypatch, capsys):
+    seen = {}
+
+    class FakeConnector:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+        def fetch(self, url):
+            from undertone_audio.connectors import ConnectorAsset
+
+            return ConnectorAsset(
+                audio_path=Path("/tmp/yt.wav"),
+                source_url=url,
+                source_kind="youtube-audio",
+                transcript_id_hint="youtube-abc",
+                metadata={"source": "youtube"},
+            )
+
+    monkeypatch.setattr("undertone_audio.commands.connectors.YouTubeConnector", FakeConnector)
+
+    assert (
+        main(
+            [
+                "youtube-ingest",
+                "https://youtu.be/abc",
+                "--dry-run",
+                "--json",
+                "--process-timeout-seconds",
+                "9",
+            ]
+        )
+        == 0
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["transcript_id_hint"] == "youtube-abc"
+    assert seen["process_timeout_seconds"] == 9
 
 
 def test_youtube_ingest_missing_binary_names_fix(capsys):

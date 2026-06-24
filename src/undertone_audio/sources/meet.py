@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +10,7 @@ import requests
 
 from undertone_audio.audio import AudioPreprocessor
 from undertone_audio.engines.base import RawTranscript
+from undertone_audio.processes import atomic_write_path, run_process_sync
 from undertone_audio.schema import Segment, Speaker, Word
 
 MEET_BASE = "https://meet.googleapis.com/v2"
@@ -292,35 +292,36 @@ def download_recording_mp4(
         stream=True,
     )
     response.raise_for_status()
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    with dest.open("wb") as fp:
-        for chunk in response.iter_content(chunk_size=1 << 20):
-            if chunk:
-                fp.write(chunk)
+    with atomic_write_path(dest) as tmp_path:
+        with tmp_path.open("wb") as fp:
+            for chunk in response.iter_content(chunk_size=1 << 20):
+                if chunk:
+                    fp.write(chunk)
     return dest
 
 
 def extract_audio_from_mp4(mp4_path: Path, out_path: Path | None = None) -> Path:
     out_path = out_path or mp4_path.with_suffix(".wav")
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(mp4_path),
-            "-vn",
-            "-ac",
-            "1",
-            "-ar",
-            "16000",
-            "-acodec",
-            "pcm_s16le",
-            str(out_path),
-        ],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    with atomic_write_path(out_path) as tmp_path:
+        run_process_sync(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(mp4_path),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-acodec",
+                "pcm_s16le",
+                "-f",
+                "wav",
+                str(tmp_path),
+            ],
+            label="ffmpeg extract meet audio",
+        )
     return out_path
 
 

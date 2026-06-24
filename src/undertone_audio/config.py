@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from undertone_audio.processes import validate_process_timeout
+
 
 def _env_bool(name: str, default: bool) -> bool:
     value = os.environ.get(name)
@@ -25,6 +27,8 @@ class Config:
     diarization_model: str = "FluidAudio Sortformer + process"
     vad_model: str = "FluidAudio/Silero VAD"
     embedding_model: str = "FluidAudio pyannote-derived speaker embeddings"
+    pyannote_model: str = "pyannote/speaker-diarization-community-1"
+    pyannote_device: str = "auto"
     fingerprint_backend: str = "undertone-speaker-fingerprints"
     clustering_threshold: float = 0.7045655
     speaker_merge_threshold: float = 0.82
@@ -42,6 +46,10 @@ class Config:
     webhook_secret: str | None = None
     webhook_enabled: bool = True
     webhook_accept_degraded: bool = False
+    process_timeout_seconds: float = 7200.0
+
+    def __post_init__(self) -> None:
+        validate_process_timeout(self.process_timeout_seconds)
 
 
 def _env_float(name: str, default: float) -> float:
@@ -70,6 +78,11 @@ def load() -> Config:
             "UNDERTONE_EMBEDDING_MODEL",
             "FluidAudio pyannote-derived speaker embeddings",
         ),
+        pyannote_model=os.environ.get(
+            "UNDERTONE_PYANNOTE_MODEL",
+            "pyannote/speaker-diarization-community-1",
+        ),
+        pyannote_device=os.environ.get("UNDERTONE_PYANNOTE_DEVICE", "auto"),
         fingerprint_backend=os.environ.get(
             "UNDERTONE_FINGERPRINT_BACKEND",
             "undertone-speaker-fingerprints",
@@ -93,4 +106,5 @@ def load() -> Config:
         webhook_secret=os.environ.get("UNDERTONE_WEBHOOK_SECRET"),
         webhook_enabled=_env_bool("UNDERTONE_WEBHOOK_ENABLED", True),
         webhook_accept_degraded=_env_bool("UNDERTONE_WEBHOOK_ACCEPT_DEGRADED", False),
+        process_timeout_seconds=_env_float("UNDERTONE_PROCESS_TIMEOUT_SECONDS", 7200.0),
     )

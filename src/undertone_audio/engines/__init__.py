@@ -2,6 +2,7 @@ from undertone_audio.config import Config, load as load_config
 from undertone_audio.engines.base import RawTranscript, TranscriptionEngine
 from undertone_audio.engines.fluidaudio_cli import FluidAudioCLIEngine, FluidAudioModelSelection
 from undertone_audio.engines.fluidaudio_hybrid import FluidAudioHybridEngine
+from undertone_audio.engines.fluidaudio_pyannote import FluidAudioPyannoteEngine
 
 
 def create_engine(name: str | None = None, config: Config | None = None) -> TranscriptionEngine:
@@ -18,21 +19,34 @@ def create_engine(name: str | None = None, config: Config | None = None) -> Tran
             cli_path=cfg.fluidaudio_cli,
             clustering_threshold=cfg.clustering_threshold,
             model_selection=model_selection,
+            process_timeout_seconds=cfg.process_timeout_seconds,
         )
     if engine_name == "fluidaudio-hybrid":
         return FluidAudioHybridEngine(
             cli_path=cfg.fluidaudio_cli,
             clustering_threshold=cfg.clustering_threshold,
             model_selection=model_selection,
+            process_timeout_seconds=cfg.process_timeout_seconds,
+        )
+    if engine_name == "fluidaudio-pyannote":
+        return FluidAudioPyannoteEngine(
+            cli_path=cfg.fluidaudio_cli,
+            clustering_threshold=cfg.clustering_threshold,
+            model_selection=model_selection,
+            pyannote_model=cfg.pyannote_model,
+            pyannote_device=cfg.pyannote_device,
+            process_timeout_seconds=cfg.process_timeout_seconds,
         )
     raise ValueError(
-        f"unknown Undertone engine {engine_name!r}; expected fluidaudio-hybrid or fluidaudio-cli"
+        f"unknown Undertone engine {engine_name!r}; expected "
+        f"fluidaudio-hybrid, fluidaudio-pyannote, or fluidaudio-cli"
     )
 
 
 __all__ = [
     "FluidAudioCLIEngine",
     "FluidAudioHybridEngine",
+    "FluidAudioPyannoteEngine",
     "RawTranscript",
     "TranscriptionEngine",
     "create_engine",

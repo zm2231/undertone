@@ -85,16 +85,17 @@ Optional extras:
 
 ```bash
 pip install 'undertone-audio[voice]'       # Parselmouth acoustic metrics
+pip install 'undertone-audio[pyannote]'    # Optional pyannote diarization backend
 pip install 'undertone-audio[meet]'        # Google Meet auth helpers
 pip install 'undertone-audio[connectors]'  # YouTube connector via yt-dlp
-pip install 'undertone-audio[voice,meet,connectors]'
+pip install 'undertone-audio[voice,pyannote,meet,connectors]'
 ```
 
 Or from source, for development:
 
 ```bash
 pip install -e '.[dev]'
-pip install -e '.[dev,voice,meet,connectors]'
+pip install -e '.[dev,voice,pyannote,meet,connectors]'
 ```
 
 ### 3. Verify
@@ -103,7 +104,16 @@ pip install -e '.[dev,voice,meet,connectors]'
 command -v fluidaudiocli
 undertone --help
 undertone models
+undertone doctor
 ```
+
+If you installed the optional pyannote backend, check that its Python dependency imports:
+
+```bash
+undertone doctor --check-pyannote
+```
+
+This does not download or load a gated Hugging Face model; model access is verified when the backend runs.
 
 ## Quick Start
 
@@ -149,6 +159,7 @@ Inspect effective model and backend selections:
 undertone --db ./undertone.db models
 undertone --db ./undertone.db doctor
 undertone --db ./undertone.db doctor --all
+undertone --db ./undertone.db doctor --check-pyannote
 ```
 
 Source commands are always visible. There is no per-source enable switch; a source becomes ready when its optional dependency, credentials, or local data exists. `doctor` shows optional source readiness, and source commands print fix-oriented messages when a dependency is missing.
@@ -182,6 +193,37 @@ Ingest commands fail instead of silently overwriting an existing transcript id. 
 undertone --db ./undertone.db run-wav ./meeting.wav --engine fluidaudio-cli
 ```
 
+`fluidaudio-pyannote` uses FluidAudio for word-timestamped ASR and runs `pyannote.audio` in-process for diarization spans and speaker embeddings. Install it only if you need that backend:
+
+```bash
+pip install 'undertone-audio[pyannote]'
+undertone doctor --check-pyannote
+undertone --db ./undertone.db run-wav ./meeting.wav --engine fluidaudio-pyannote
+```
+
+Pyannote model/device selection is configurable without local path hooks:
+
+```bash
+undertone run-wav ./meeting.wav \
+  --engine fluidaudio-pyannote \
+  --pyannote-model community-1 \
+  --pyannote-device auto
+```
+
+Use `community-1`, `3.1`, or a full Hugging Face model ID. If the model is gated, accept the Hugging Face model terms and set `HF_TOKEN` or `HUGGINGFACE_TOKEN`. See [Diarization Backends](https://github.com/zm2231/undertone/blob/main/docs/diarization-backends.md) for backend details.
+
+`fluidaudio-pyannote` runs FluidAudio ASR first and starts pyannote only after ASR succeeds, so a failed ASR run never leaves a diarization model loading in the background. There is no mid-run cancellation: a slow pyannote run completes before the command returns. See [Diarization Backends](https://github.com/zm2231/undertone/blob/main/docs/diarization-backends.md) for details.
+
+To make pyannote the default engine for a shell/session:
+
+```bash
+export UNDERTONE_ENGINE=fluidaudio-pyannote
+export UNDERTONE_PYANNOTE_MODEL=community-1
+export UNDERTONE_PYANNOTE_DEVICE=auto
+```
+
+Unset `UNDERTONE_ENGINE` or set it back to `fluidaudio-hybrid` to return to the default FluidAudio hybrid path.
+
 Override model labels per command:
 
 ```bash
@@ -190,10 +232,14 @@ undertone run-wav ./meeting.wav \
   --diarization-model "FluidAudio Sortformer + process" \
   --vad-model "FluidAudio/Silero VAD" \
   --embedding-model "FluidAudio pyannote-derived speaker embeddings" \
+  --pyannote-model "pyannote/speaker-diarization-community-1" \
+  --pyannote-device auto \
   --voice-metrics required
 ```
 
-Non-default model flags are passed to the FluidAudio boundary. Unsupported combinations fail at audio processing time.
+FluidAudio model flags are passed to the FluidAudio boundary. Pyannote flags configure the optional in-process pyannote backend. Unsupported combinations fail at audio processing time.
+
+External binaries are bounded by `UNDERTONE_PROCESS_TIMEOUT_SECONDS` or `--process-timeout-seconds` on ingest commands. The default is 7200 seconds; set it to `0` only if you intentionally want no subprocess timeout.
 
 ## Source Rule
 
@@ -216,7 +262,7 @@ UNDERTONE_WEBHOOK_ENABLED=0 undertone --db ./undertone.db youtube-ingest \
   --output ./youtube.json
 ```
 
-Flags: `--yt-dlp-bin` (non-default binary), `--audio-format wav`, `--include-playlist`, `--dry-run` (select media and print metadata without ingesting).
+Flags: `--yt-dlp-bin` (non-default binary), `--audio-format wav`, `--include-playlist`, `--dry-run` (select media and print metadata without ingesting). Downloads are published only after a completed transfer; interrupted downloads do not leave reusable media files behind.
 
 ### Podcasts
 
@@ -227,7 +273,7 @@ undertone --db ./undertone.db podcast-ingest 'https://example.com/feed.xml' --ti
 undertone --db ./undertone.db podcast-ingest 'https://cdn.example.com/episode.mp3'
 ```
 
-Episodes are selected by zero-based `--episode` index or first `--title-contains` match. Direct media URLs skip RSS parsing.
+Episodes are selected by zero-based `--episode` index or first `--title-contains` match. Direct media URLs skip RSS parsing. Downloads are published atomically, so a dropped stream does not poison the cache for the next run.
 
 ### Quill
 
@@ -263,6 +309,8 @@ No command needs a machine-specific absolute path. Defaults are portable:
 - database: `UNDERTONE_DB_PATH` or `--db` (default `./undertone.db`)
 - connector downloads: `UNDERTONE_DOWNLOAD_DIR`, `--download-dir`, `XDG_CACHE_HOME/undertone/downloads`, or `~/.cache/undertone/downloads`
 - FluidAudio binary: `UNDERTONE_FLUIDAUDIO_CLI`, `FLUIDAUDIO_CLI`, or `fluidaudiocli` on `PATH`
+- external process timeout: `UNDERTONE_PROCESS_TIMEOUT_SECONDS` or `--process-timeout-seconds` on ingest commands (default `7200`; `0` disables)
+- pyannote backend selection: `UNDERTONE_PYANNOTE_MODEL` and `UNDERTONE_PYANNOTE_DEVICE`
 
 ## Output Formats
 
@@ -399,6 +447,7 @@ The signature header is `x-zen-signature-256`, a SHA-256 HMAC over the payload b
 UNDERTONE_DB_PATH=./undertone.db
 UNDERTONE_ENGINE=fluidaudio-hybrid
 UNDERTONE_FLUIDAUDIO_CLI=/path/to/fluidaudiocli
+UNDERTONE_PROCESS_TIMEOUT_SECONDS=7200
 UNDERTONE_DOWNLOAD_DIR=./downloads
 UNDERTONE_VOICE_METRICS=optional
 UNDERTONE_OUTPUT_FORMAT=json
@@ -413,6 +462,8 @@ UNDERTONE_ASR_MODEL="FluidAudio Parakeet TDT"
 UNDERTONE_DIARIZATION_MODEL="FluidAudio Sortformer + process"
 UNDERTONE_VAD_MODEL="FluidAudio/Silero VAD"
 UNDERTONE_EMBEDDING_MODEL="FluidAudio pyannote-derived speaker embeddings"
+UNDERTONE_PYANNOTE_MODEL=pyannote/speaker-diarization-community-1
+UNDERTONE_PYANNOTE_DEVICE=auto
 UNDERTONE_FINGERPRINT_BACKEND=undertone-speaker-fingerprints
 UNDERTONE_CLUSTERING_THRESHOLD=0.7045655
 UNDERTONE_SPEAKER_MERGE_THRESHOLD=0.82

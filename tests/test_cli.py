@@ -50,20 +50,23 @@ def test_cli_finalize_load_search_and_emit(tmp_path, monkeypatch, capsys):
     metadata_path.write_text(json.dumps({"title": "raw producer meeting"}))
     db = tmp_path / "state" / "undertone.db"
 
-    assert main(
-        [
-            "--db",
-            str(db),
-            "finalize-json",
-            str(raw_path),
-            "--transcript-id",
-            "cli-1",
-            "--source-metadata",
-            str(metadata_path),
-            "--diarization-state",
-            "ok",
-        ]
-    ) == 0
+    assert (
+        main(
+            [
+                "--db",
+                str(db),
+                "finalize-json",
+                str(raw_path),
+                "--transcript-id",
+                "cli-1",
+                "--source-metadata",
+                str(metadata_path),
+                "--diarization-state",
+                "ok",
+            ]
+        )
+        == 0
+    )
     finalized = json.loads(capsys.readouterr().out)
     assert finalized["transcript_id"] == "cli-1"
     assert finalized["metadata"]["source_metadata"] == {"title": "raw producer meeting"}
@@ -107,7 +110,7 @@ def test_cli_operator_commands_for_saved_transcript(tmp_path, monkeypatch, capsy
     raw_path.write_text(
         json.dumps(
             {
-                "duration_ms": 3000,
+                "duration_ms": 16000,
                 "language": "en",
                 "engine": "fixture",
                 "speakers": [{"speaker_id": "S1", "embedding": [1.0, 0.0]}],
@@ -116,7 +119,7 @@ def test_cli_operator_commands_for_saved_transcript(tmp_path, monkeypatch, capsy
                         "segment_id": "seg1",
                         "speaker_id": "S1",
                         "start_ms": 0,
-                        "end_ms": 3000,
+                        "end_ms": 16000,
                         "text": "um operator commands work",
                     }
                 ],
@@ -137,9 +140,11 @@ def test_cli_operator_commands_for_saved_transcript(tmp_path, monkeypatch, capsy
     assert main(["--db", str(db), "stats", "--json"]) == 0
     stats = json.loads(capsys.readouterr().out)
     assert stats["transcript_count"] == 1
-    assert stats["total_duration_ms"] == 3000
+    assert stats["total_duration_ms"] == 16000
 
-    assert main(["--db", str(db), "fingerprint-label", fingerprint_id, "Alex Rivera", "--json"]) == 0
+    assert (
+        main(["--db", str(db), "fingerprint-label", fingerprint_id, "Alex Rivera", "--json"]) == 0
+    )
     assert json.loads(capsys.readouterr().out)["display_name"] == "Alex Rivera"
     assert main(["--db", str(db), "fingerprints", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)[0]["display_name"] == "Alex Rivera"
@@ -240,7 +245,7 @@ def test_cli_run_wav_uses_engine_and_assigns_fingerprint(tmp_path, monkeypatch, 
         async def transcribe(self, audio_path: Path):
             assert audio_path.name == "fixture.wav"
             return RawTranscript(
-                duration_ms=1000,
+                duration_ms=16000,
                 language="en",
                 engine="fluidaudio-hybrid",
                 speakers=[Speaker(speaker_id="S1", embedding=[1.0, 0.0])],
@@ -249,7 +254,7 @@ def test_cli_run_wav_uses_engine_and_assigns_fingerprint(tmp_path, monkeypatch, 
                         segment_id="seg1",
                         speaker_id="S1",
                         start_ms=0,
-                        end_ms=1000,
+                        end_ms=16000,
                         text="wav path works",
                     )
                 ],
@@ -265,18 +270,21 @@ def test_cli_run_wav_uses_engine_and_assigns_fingerprint(tmp_path, monkeypatch, 
     audio.write_bytes(b"not a real wav")
     db = tmp_path / "undertone.db"
 
-    assert main(
-        [
-            "--db",
-            str(db),
-            "run-wav",
-            str(audio),
-            "--engine",
-            "fluidaudio-cli",
-            "--transcript-id",
-            "wav-1",
-        ]
-    ) == 0
+    assert (
+        main(
+            [
+                "--db",
+                str(db),
+                "run-wav",
+                str(audio),
+                "--engine",
+                "fluidaudio-cli",
+                "--transcript-id",
+                "wav-1",
+            ]
+        )
+        == 0
+    )
     transcript = json.loads(capsys.readouterr().out)
     assert transcript["transcript_id"] == "wav-1"
     assert transcript["metadata"]["asr_backend"] == "FluidAudio Parakeet TDT"
@@ -312,34 +320,39 @@ def test_cli_run_wav_output_format_and_model_flags(tmp_path, monkeypatch, capsys
                 ],
             )
 
-    monkeypatch.setattr("undertone_audio.commands.core.create_engine", lambda name, config: FakeEngine())
+    monkeypatch.setattr(
+        "undertone_audio.commands.core.create_engine", lambda name, config: FakeEngine()
+    )
     monkeypatch.setenv("UNDERTONE_WEBHOOK_ENABLED", "0")
     audio = tmp_path / "fixture.wav"
     audio.write_bytes(b"not a real wav")
     out = tmp_path / "out.md"
 
-    assert main(
-        [
-            "--db",
-            str(tmp_path / "undertone.db"),
-            "run-wav",
-            str(audio),
-            "--transcript-id",
-            "wav-md",
-            "--asr-model",
-            "custom-asr",
-            "--diarization-model",
-            "custom-diar",
-            "--voice-metrics",
-            "off",
-            "--output-format",
-            "md",
-            "--output-detail",
-            "standard",
-            "--output",
-            str(out),
-        ]
-    ) == 0
+    assert (
+        main(
+            [
+                "--db",
+                str(tmp_path / "undertone.db"),
+                "run-wav",
+                str(audio),
+                "--transcript-id",
+                "wav-md",
+                "--asr-model",
+                "custom-asr",
+                "--diarization-model",
+                "custom-diar",
+                "--voice-metrics",
+                "off",
+                "--output-format",
+                "md",
+                "--output-detail",
+                "standard",
+                "--output",
+                str(out),
+            ]
+        )
+        == 0
+    )
 
     assert capsys.readouterr().out == ""
     body = out.read_text()
@@ -354,19 +367,24 @@ def test_cli_run_wav_output_format_and_model_flags(tmp_path, monkeypatch, capsys
 
 
 def test_cli_models_reports_effective_backend_selection(tmp_path, capsys):
-    assert main(
-        [
-            "--db",
-            str(tmp_path / "undertone.db"),
-            "models",
-            "--json",
-        ]
-    ) == 0
+    assert (
+        main(
+            [
+                "--db",
+                str(tmp_path / "undertone.db"),
+                "models",
+                "--json",
+            ]
+        )
+        == 0
+    )
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["engine"] == "fluidaudio-hybrid"
     assert payload["asr_model"] == "FluidAudio Parakeet TDT"
     assert payload["output_detail"] == "full"
+    assert payload["pyannote_model"] == "pyannote/speaker-diarization-community-1"
+    assert payload["pyannote_device"] == "auto"
     assert payload["features"]["linguistic"] is True
     assert payload["thresholds"]["clustering"] == 0.7045655
     assert payload["thresholds"]["fingerprint_similarity"] == 0.78
@@ -379,13 +397,14 @@ def test_cli_doctor_reports_checks(tmp_path, monkeypatch, capsys):
         async def healthcheck(self):
             return True
 
-    monkeypatch.setattr("undertone_audio.commands.ops.create_engine", lambda name, config: FakeEngine())
-    monkeypatch.setattr("undertone_audio.commands.ops.shutil.which", lambda name: f"/usr/bin/{name}")
-
-    assert (
-        main(["--db", str(tmp_path / "undertone.db"), "doctor", "--check-yt-dlp", "--json"])
-        == 0
+    monkeypatch.setattr(
+        "undertone_audio.commands.ops.create_engine", lambda name, config: FakeEngine()
     )
+    monkeypatch.setattr(
+        "undertone_audio.commands.ops.shutil.which", lambda name: f"/usr/bin/{name}"
+    )
+
+    assert main(["--db", str(tmp_path / "undertone.db"), "doctor", "--check-yt-dlp", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
@@ -396,6 +415,48 @@ def test_cli_doctor_reports_checks(tmp_path, monkeypatch, capsys):
         "meet",
         "quill",
     }
+
+
+def test_cli_doctor_reports_pyannote_readiness(tmp_path, monkeypatch, capsys):
+    class FakeEngine:
+        cli_path = "/tmp/fluidaudiocli"
+
+        async def healthcheck(self):
+            return True
+
+    monkeypatch.setattr(
+        "undertone_audio.commands.ops.create_engine", lambda name, config: FakeEngine()
+    )
+    monkeypatch.setattr(
+        "undertone_audio.commands.ops.pyannote_status",
+        lambda model, device: {
+            "ok": False,
+            "model": model,
+            "device": device,
+            "error": "missing",
+            "fix": "Install pyannote support.",
+        },
+    )
+
+    assert (
+        main(
+            [
+                "--db",
+                str(tmp_path / "undertone.db"),
+                "doctor",
+                "--check-pyannote",
+                "--json",
+            ]
+        )
+        == 1
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    pyannote = next(check for check in payload["checks"] if check["name"] == "pyannote")
+    assert pyannote["ok"] is False
+    assert pyannote["model"] == "pyannote/speaker-diarization-community-1"
+    assert pyannote["device"] == "auto"
+    assert pyannote["fix"] == "Install pyannote support."
 
 
 def test_cli_numeric_zero_overrides_are_preserved(tmp_path, monkeypatch):
@@ -410,6 +471,8 @@ def test_cli_numeric_zero_overrides_are_preserved(tmp_path, monkeypatch):
         min_talk_seconds=0.0,
         fingerprint_similarity_threshold=0.0,
         turn_gap_ms=0,
+        pyannote_model=None,
+        pyannote_device=None,
     )
 
     config = config_for_args(args)
@@ -439,12 +502,14 @@ def test_cli_human_readable_operator_outputs(tmp_path, monkeypatch, capsys):
         async def healthcheck(self):
             return True
 
-    monkeypatch.setattr("undertone_audio.commands.ops.create_engine", lambda name, config: FakeEngine())
+    monkeypatch.setattr(
+        "undertone_audio.commands.ops.create_engine", lambda name, config: FakeEngine()
+    )
     raw_path = tmp_path / "raw.json"
     raw_path.write_text(
         json.dumps(
             {
-                "duration_ms": 2000,
+                "duration_ms": 16000,
                 "language": "en",
                 "engine": "fixture",
                 "speakers": [{"speaker_id": "S1", "embedding": [1.0, 0.0]}],
@@ -453,7 +518,7 @@ def test_cli_human_readable_operator_outputs(tmp_path, monkeypatch, capsys):
                         "segment_id": "seg1",
                         "speaker_id": "S1",
                         "start_ms": 0,
-                        "end_ms": 2000,
+                        "end_ms": 16000,
                         "text": "human readable speaker line",
                     }
                 ],
@@ -461,7 +526,9 @@ def test_cli_human_readable_operator_outputs(tmp_path, monkeypatch, capsys):
         )
     )
     db = tmp_path / "undertone.db"
-    assert main(["--db", str(db), "finalize-json", str(raw_path), "--transcript-id", "human-1"]) == 0
+    assert (
+        main(["--db", str(db), "finalize-json", str(raw_path), "--transcript-id", "human-1"]) == 0
+    )
     created = json.loads(capsys.readouterr().out)
     fingerprint_id = created["speakers"][0]["fingerprint_id"]
 

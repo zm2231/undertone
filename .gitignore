@@ -18,3 +18,8 @@ migration/
 migrations-local/
 *.migration.json
 *.migration.jsonl
+
+# Local benchmarking/research artifacts are useful while tuning backfills but
+# should not ship in the public package.
+scripts/
+docs/research/

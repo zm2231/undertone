@@ -3,10 +3,11 @@ from __future__ import annotations
 import os
 import re
 import shutil
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
+
+from undertone_audio.processes import load_json_text, run_process_sync
 
 
 class ConnectorError(RuntimeError):
@@ -46,26 +47,23 @@ def ensure_binary(binary: str) -> str:
     return resolved
 
 
-def run_json(cmd: list[str]) -> dict:
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if proc.returncode != 0:
-        raise ConnectorError(_command_error(cmd, proc))
+def run_json(cmd: list[str], *, timeout_seconds: float | None = None) -> dict:
     try:
-        import json
-
-        value = json.loads(proc.stdout)
+        proc = run_process_sync(cmd, label=cmd[0], timeout_seconds=timeout_seconds)
+    except RuntimeError as exc:
+        raise ConnectorError(str(exc)) from exc
+    try:
+        value = load_json_text(proc.stdout, producer=cmd[0])
     except Exception as exc:
-        raise ConnectorError(f"command did not return valid JSON: {cmd[0]}") from exc
-    if not isinstance(value, dict):
-        raise ConnectorError(f"command returned non-object JSON: {cmd[0]}")
+        raise ConnectorError(str(exc)) from exc
     return value
 
 
-def run_checked(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if proc.returncode != 0:
-        raise ConnectorError(_command_error(cmd, proc))
-    return proc
+def run_checked(cmd: list[str], *, timeout_seconds: float | None = None):
+    try:
+        return run_process_sync(cmd, label=cmd[0], timeout_seconds=timeout_seconds)
+    except RuntimeError as exc:
+        raise ConnectorError(str(exc)) from exc
 
 
 def safe_stem(*parts: str | None, fallback: str = "audio") -> str:
@@ -76,10 +74,3 @@ def safe_stem(*parts: str | None, fallback: str = "audio") -> str:
 
 def compact_metadata(data: Mapping) -> dict:
     return {str(key): value for key, value in data.items() if value not in (None, "", [], {})}
-
-
-def _command_error(cmd: list[str], proc: subprocess.CompletedProcess[str]) -> str:
-    stderr = proc.stderr.strip()
-    stdout = proc.stdout.strip()
-    detail = stderr or stdout or "no output"
-    return f"{cmd[0]} failed with exit {proc.returncode}: {detail[:1000]}"

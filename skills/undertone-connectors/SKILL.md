@@ -23,6 +23,8 @@ Do not hardcode local machine paths. Use one of:
 - `UNDERTONE_DOWNLOAD_DIR=/path/to/cache`
 - default cache path from `XDG_CACHE_HOME/undertone/downloads` or `~/.cache/undertone/downloads`
 
+Downloads publish atomically. A failed YouTube or podcast transfer should not leave a reusable media file in the cache. External downloader/process calls use `UNDERTONE_PROCESS_TIMEOUT_SECONDS`; set it only when long media needs a different bound.
+
 ## YouTube
 
 ```bash

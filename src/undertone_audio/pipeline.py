@@ -32,6 +32,7 @@ from undertone_audio.schema import (
 from undertone_audio.storage import TranscriptStore
 from undertone_audio.webhooks import emit_transcript_ready
 
+
 class AudioPipeline:
     def __init__(
         self,
@@ -124,6 +125,7 @@ class AudioPipeline:
             speakers, fingerprint_plan = self.fingerprint_store.assign_fingerprints(
                 speakers,
                 persist=False,
+                speaker_durations_ms=talk_time_per_speaker(segments),
             )
 
         inferred_diarization_state = diarization_state
@@ -168,7 +170,7 @@ class AudioPipeline:
                 diarization_backend=diarization_backend
                 or _diarization_backend(raw.engine, self.config),
                 vad_backend=vad_backend or self.config.vad_model,
-                embedding_backend=embedding_backend or self.config.embedding_model,
+                embedding_backend=embedding_backend or _embedding_backend(raw.engine, self.config),
                 fingerprint_backend=fingerprint_backend
                 or (self.config.fingerprint_backend if apply_speaker_processing else None),
                 model_versions=model_versions or _model_versions(raw.engine, self.config),
@@ -213,10 +215,9 @@ class AudioPipeline:
         interruptions = interruption_counts(segments)
         fillers_per_speaker: dict[str, int] = {}
         for segment in segments:
-            fillers_per_speaker[segment.speaker_id] = (
-                fillers_per_speaker.get(segment.speaker_id, 0)
-                + len(segment.enrichment.fillers)
-            )
+            fillers_per_speaker[segment.speaker_id] = fillers_per_speaker.get(
+                segment.speaker_id, 0
+            ) + len(segment.enrichment.fillers)
 
         metrics = []
         for speaker_id in talk:
@@ -256,6 +257,10 @@ def _asr_backend(engine: str, config: Config) -> str | None:
 
 
 def _diarization_backend(engine: str, config: Config) -> str | None:
+    if engine == "fluidaudio-pyannote":
+        from undertone_audio.engines.fluidaudio_pyannote import resolve_pyannote_model
+
+        return resolve_pyannote_model(config.pyannote_model)
     if engine == "fluidaudio-hybrid":
         return config.diarization_model
     if engine == "fluidaudio-cli":
@@ -263,16 +268,22 @@ def _diarization_backend(engine: str, config: Config) -> str | None:
     return None
 
 
+def _embedding_backend(engine: str, config: Config) -> str:
+    if engine == "fluidaudio-pyannote":
+        from undertone_audio.engines.fluidaudio_pyannote import resolve_pyannote_model
+
+        return resolve_pyannote_model(config.pyannote_model)
+    return config.embedding_model
+
+
 def _model_versions(engine: str, config: Config) -> dict:
     if not engine.startswith("fluidaudio"):
         return {}
     return {
         "asr": config.asr_model,
-        "diarization": config.diarization_model
-        if engine == "fluidaudio-hybrid"
-        else "FluidAudio process diarization",
+        "diarization": _diarization_backend(engine, config),
         "vad": config.vad_model,
-        "embedding": config.embedding_model,
+        "embedding": _embedding_backend(engine, config),
         "fingerprint": config.fingerprint_backend,
     }
 

@@ -7,6 +7,7 @@ import shutil
 
 from undertone_audio.commands.common import config_for_args, db_path
 from undertone_audio.engines import create_engine
+from undertone_audio.engines.fluidaudio_pyannote import pyannote_status
 from undertone_audio.source_readiness import source_statuses
 from undertone_audio.sources.meet import meet_auth_check
 from undertone_audio.storage import TranscriptStore
@@ -35,7 +36,8 @@ def register(subcommands: argparse._SubParsersAction) -> None:
     doctor = subcommands.add_parser("doctor", help="Run local undertone preflight checks.")
     doctor.add_argument("--check-yt-dlp", action="store_true")
     doctor.add_argument("--check-meet", action="store_true")
-    doctor.add_argument("--all", action="store_true", help="Check all optional source integrations.")
+    doctor.add_argument("--check-pyannote", action="store_true")
+    doctor.add_argument("--all", action="store_true", help="Check all optional integrations.")
     doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     doctor.set_defaults(func=doctor_cmd)
 
@@ -48,10 +50,13 @@ def models_cmd(args: argparse.Namespace) -> int:
         "diarization_model": config.diarization_model,
         "vad_model": config.vad_model,
         "embedding_model": config.embedding_model,
+        "pyannote_model": config.pyannote_model,
+        "pyannote_device": config.pyannote_device,
         "fingerprint_backend": config.fingerprint_backend,
         "voice_metrics": config.voice_metrics,
         "output_format": config.default_output_format,
         "output_detail": config.default_output_detail,
+        "process_timeout_seconds": config.process_timeout_seconds,
         "features": {
             "turn_taking": config.enable_turn_taking,
             "fillers": config.enable_fillers,
@@ -160,6 +165,20 @@ def doctor_cmd(args: argparse.Namespace) -> int:
             }
         )
         ok = ok and path is not None
+    if args.check_pyannote or args.all:
+        pyannote = pyannote_status(config.pyannote_model, config.pyannote_device)
+        checks.append(
+            {
+                "name": "pyannote",
+                "ok": pyannote["ok"],
+                "model": pyannote.get("model"),
+                "device": pyannote.get("device"),
+                "detail": pyannote.get("detail"),
+                "error": pyannote.get("error"),
+                "fix": pyannote.get("fix"),
+            }
+        )
+        ok = ok and bool(pyannote["ok"])
     if args.check_meet or args.all:
         meet = meet_auth_check()
         checks.append(
@@ -191,8 +210,11 @@ def _render_models(payload: dict) -> str:
         f"  diarization:         {payload['diarization_model']}",
         f"  VAD:                 {payload['vad_model']}",
         f"  embeddings:          {payload['embedding_model']}",
+        f"  pyannote model:      {payload['pyannote_model']}",
+        f"  pyannote device:     {payload['pyannote_device']}",
         f"  fingerprints:        {payload['fingerprint_backend']}",
         f"  voice metrics:       {payload['voice_metrics']}",
+        f"  process timeout:     {payload['process_timeout_seconds']}s",
         f"  default output:      {payload['output_format']} ({payload['output_detail']})",
         f"  features:            {features}",
         "  thresholds:",
@@ -244,7 +266,18 @@ def _render_sources(rows: list[dict]) -> str:
 
 def _check_detail(check: dict) -> str:
     parts = []
-    for key in ("path", "engine", "fluidaudio_cli", "project", "state", "detail", "error", "fix"):
+    for key in (
+        "path",
+        "engine",
+        "fluidaudio_cli",
+        "model",
+        "device",
+        "project",
+        "state",
+        "detail",
+        "error",
+        "fix",
+    ):
         value = check.get(key)
         if value:
             parts.append(f"{key}={value}")

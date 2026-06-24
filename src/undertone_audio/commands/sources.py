@@ -7,6 +7,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+from undertone_audio.audio import AudioPreprocessor
 from undertone_audio.commands.common import (
     add_audio_pipeline_flags,
     add_duplicate_flags,
@@ -99,7 +100,11 @@ def quill_list_cmd(args: argparse.Namespace) -> int:
 
 def quill_ingest_cmd(args: argparse.Namespace) -> int:
     config = config_for_args(args)
-    source = QuillSource(db_path=args.quill_db, meetings_dir=args.meetings_dir)
+    source = QuillSource(
+        db_path=args.quill_db,
+        meetings_dir=args.meetings_dir,
+        preprocessor=AudioPreprocessor(process_timeout_seconds=config.process_timeout_seconds),
+    )
     meetings = [source.meeting(args.meeting_id)] if args.meeting_id else source.list_meetings(limit=args.limit or 50)
     report = {"seen": len(meetings), "ingested": 0, "skipped": []}
     if args.dry_run:
@@ -166,6 +171,7 @@ def meet_ingest_cmd(args: argparse.Namespace) -> int:
     config = config_for_args(args)
     source = MeetSource(
         download_dir=args.download_dir,
+        preprocessor=AudioPreprocessor(process_timeout_seconds=config.process_timeout_seconds),
         google_account=args.google_account,
         adc_file=args.adc_file,
     )

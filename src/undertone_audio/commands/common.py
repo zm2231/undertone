@@ -6,11 +6,19 @@ from pathlib import Path
 
 from undertone_audio.config import Config, load as load_config
 from undertone_audio.engines.base import RawTranscript
-from undertone_audio.export import OUTPUT_DETAIL_LEVELS, OUTPUT_FORMATS, render_transcript, write_or_print
+from undertone_audio.export import (
+    OUTPUT_DETAIL_LEVELS,
+    OUTPUT_FORMATS,
+    render_transcript,
+    write_or_print,
+)
 
 
 def add_audio_pipeline_flags(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--engine", choices=["fluidaudio-hybrid", "fluidaudio-cli"])
+    parser.add_argument(
+        "--engine",
+        choices=["fluidaudio-hybrid", "fluidaudio-pyannote", "fluidaudio-cli"],
+    )
     parser.add_argument("--fluidaudio-cli")
     parser.add_argument("--expected-speaker-count", type=int)
     parser.add_argument("--expected-speaker-source")
@@ -23,7 +31,14 @@ def add_audio_pipeline_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--diarization-model")
     parser.add_argument("--vad-model")
     parser.add_argument("--embedding-model")
+    parser.add_argument("--pyannote-model")
+    parser.add_argument("--pyannote-device")
     parser.add_argument("--fingerprint-backend")
+    parser.add_argument(
+        "--process-timeout-seconds",
+        type=float,
+        help="Bound external FluidAudio/ffmpeg/yt-dlp subprocesses; 0 disables the timeout.",
+    )
     parser.add_argument("--voice-metrics", choices=["off", "optional", "required"])
     parser.add_argument("--output-format", choices=sorted(OUTPUT_FORMATS))
     parser.add_argument("--output-detail", choices=sorted(OUTPUT_DETAIL_LEVELS))
@@ -54,6 +69,8 @@ def config_for_args(args: argparse.Namespace) -> Config:
         diarization_model=getattr(args, "diarization_model", None) or cfg.diarization_model,
         vad_model=getattr(args, "vad_model", None) or cfg.vad_model,
         embedding_model=getattr(args, "embedding_model", None) or cfg.embedding_model,
+        pyannote_model=getattr(args, "pyannote_model", None) or cfg.pyannote_model,
+        pyannote_device=getattr(args, "pyannote_device", None) or cfg.pyannote_device,
         fingerprint_backend=getattr(args, "fingerprint_backend", None) or cfg.fingerprint_backend,
         clustering_threshold=_override(args, "clustering_threshold", cfg.clustering_threshold),
         speaker_merge_threshold=_override(
@@ -79,6 +96,11 @@ def config_for_args(args: argparse.Namespace) -> Config:
         webhook_secret=cfg.webhook_secret,
         webhook_enabled=cfg.webhook_enabled,
         webhook_accept_degraded=cfg.webhook_accept_degraded,
+        process_timeout_seconds=_override(
+            args,
+            "process_timeout_seconds",
+            cfg.process_timeout_seconds,
+        ),
     )
 
 

@@ -9,7 +9,6 @@ Combines FluidAudio transcribe + process + sortformer:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import tempfile
 from collections import defaultdict
@@ -24,6 +23,7 @@ from undertone_audio.engines.fluidaudio_cli import (
     merge_transcribe_and_diarize,
     words_to_segments,
 )
+from undertone_audio.processes import load_json_file
 from undertone_audio.schema import Segment, Speaker
 
 log = logging.getLogger(__name__)
@@ -41,9 +41,21 @@ class FluidAudioHybridEngine(FluidAudioCLIEngine):
             process_json = root / "process.json"
             sortformer_json = root / "sortformer.json"
             await self._run_three(audio_path, transcribe_json, process_json, sortformer_json)
-            t_data = json.loads(transcribe_json.read_text())
-            p_data = json.loads(process_json.read_text())
-            s_data = json.loads(sortformer_json.read_text())
+            t_data = load_json_file(
+                transcribe_json,
+                producer="FluidAudio transcribe",
+                required_keys=("wordTimings",),
+            )
+            p_data = load_json_file(
+                process_json,
+                producer="FluidAudio process",
+                required_keys=("segments",),
+            )
+            s_data = load_json_file(
+                sortformer_json,
+                producer="FluidAudio sortformer",
+                required_keys=("segments",),
+            )
         return merge_hybrid(t_data, p_data, s_data)
 
     async def _run_three(

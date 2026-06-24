@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import logging
-import subprocess
 from collections import defaultdict
 from pathlib import Path
 
+from undertone_audio.processes import run_process_sync
 from undertone_audio.schema import Segment
 
 log = logging.getLogger(__name__)
@@ -93,7 +93,7 @@ def _load_audio(audio_path: Path, np) -> tuple[object | None, int]:
         pass
 
     try:
-        proc = subprocess.run(
+        proc = run_process_sync(
             [
                 "ffmpeg",
                 "-v",
@@ -108,13 +108,13 @@ def _load_audio(audio_path: Path, np) -> tuple[object | None, int]:
                 "f32le",
                 "-",
             ],
-            check=True,
-            capture_output=True,
-            timeout=300,
+            label="ffmpeg voice metrics",
+            timeout_seconds=300,
+            text=False,
         )
         samples = np.frombuffer(proc.stdout, dtype="float32")
         return samples, TARGET_SAMPLE_RATE
-    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+    except Exception as exc:
         log.warning("voice metrics audio load failed: %s", exc)
         return None, 0
 

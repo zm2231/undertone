@@ -8,7 +8,6 @@ embeddings inside undertone's raw producer schema.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import shutil
@@ -19,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from undertone_audio.engines.base import RawTranscript
+from undertone_audio.processes import load_json_file, run_process_async
 from undertone_audio.schema import Segment, Speaker, Word
 
 log = logging.getLogger(__name__)
@@ -62,10 +62,12 @@ class FluidAudioCLIEngine:
         cli_path: str | None = None,
         clustering_threshold: float = 0.7045655,
         model_selection: FluidAudioModelSelection | None = None,
+        process_timeout_seconds: float = 7200.0,
     ):
         self.cli_path = cli_path or _default_cli_path()
         self.clustering_threshold = clustering_threshold
         self.model_selection = model_selection or FluidAudioModelSelection()
+        self.process_timeout_seconds = process_timeout_seconds
 
     async def healthcheck(self) -> bool:
         return Path(self.cli_path).exists()
@@ -75,8 +77,16 @@ class FluidAudioCLIEngine:
             transcribe_json = Path(tmpdir) / "transcribe.json"
             diarize_json = Path(tmpdir) / "diarize.json"
             await self._run_parallel(audio_path, transcribe_json, diarize_json)
-            t_data = json.loads(transcribe_json.read_text())
-            d_data = json.loads(diarize_json.read_text())
+            t_data = load_json_file(
+                transcribe_json,
+                producer="FluidAudio transcribe",
+                required_keys=("wordTimings",),
+            )
+            d_data = load_json_file(
+                diarize_json,
+                producer="FluidAudio process",
+                required_keys=("segments",),
+            )
         return merge_transcribe_and_diarize(t_data, d_data)
 
     async def transcribe_single_track(self, audio_path: Path, speaker_id: str) -> RawTranscript:
@@ -90,7 +100,11 @@ class FluidAudioCLIEngine:
                 label=f"transcribe:{speaker_id}",
             )
 
-            t_data = json.loads(out.read_text())
+            t_data = load_json_file(
+                out,
+                producer="FluidAudio transcribe",
+                required_keys=("wordTimings",),
+            )
         return transcribe_only(t_data, speaker_id)
 
     def _transcribe_cmd(self, audio_path: Path, output_json: Path) -> list[str]:
@@ -161,25 +175,11 @@ class FluidAudioCLIEngine:
 
     async def _run(self, cmd: list[str], label: str) -> None:
         log.info("fluidaudio %s: %s", label, " ".join(cmd))
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        await run_process_async(
+            cmd,
+            label=f"fluidaudio {label}",
+            timeout_seconds=self.process_timeout_seconds,
         )
-        try:
-            _, stderr = await proc.communicate()
-        except asyncio.CancelledError:
-            proc.kill()
-            try:
-                await proc.wait()
-            except Exception:
-                pass
-            raise
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"fluidaudio {label} failed (exit {proc.returncode}): "
-                f"{stderr.decode(errors='replace')[:1000]}"
-            )
 
 
 async def _gather_or_cancel(tasks: list[asyncio.Task], message: str) -> None:

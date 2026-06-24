@@ -1,6 +1,6 @@
 [project]
 name = "undertone-audio"
-version = "0.1.1"
+version = "0.1.2"
 description = "On-device audio transcripts that capture the words and how they were said."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -49,11 +49,16 @@ undertone = "undertone_audio.cli:main"
 dev = [
   "pytest>=8",
   "build>=1.2",
+  "numpy>=1.26",
+  "ruff>=0.8",
 ]
 voice = [
   "numpy>=1.26",
   "praat-parselmouth>=0.4",
   "soundfile>=0.12",
+]
+pyannote = [
+  "pyannote.audio>=4.0",
 ]
 meet = [
   "google-auth>=2.0",
@@ -73,7 +78,14 @@ build-backend = "hatchling.build"
 packages = ["src/undertone_audio"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src", "tests", "README.md", "LICENSE", "pyproject.toml"]
+include = [
+  "src",
+  "tests",
+  "docs/diarization-backends.md",
+  "README.md",
+  "LICENSE",
+  "pyproject.toml",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

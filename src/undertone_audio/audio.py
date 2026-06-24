@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import shutil
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+from undertone_audio.processes import atomic_write_path, process_timeout_from_env, run_process_sync
 
 TARGET_SAMPLE_RATE = 16_000
 TARGET_CHANNELS = 1
@@ -48,10 +49,14 @@ class AudioPreprocessor:
         cache_dir: Path = DEFAULT_CACHE,
         target_sr: int = TARGET_SAMPLE_RATE,
         target_channels: int = TARGET_CHANNELS,
+        process_timeout_seconds: float | None = None,
     ):
         self.cache_dir = Path(cache_dir)
         self.target_sr = target_sr
         self.target_channels = target_channels
+        self.process_timeout_seconds = (
+            process_timeout_from_env() if process_timeout_seconds is None else process_timeout_seconds
+        )
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
@@ -75,9 +80,14 @@ class AudioPreprocessor:
             "default=noprint_wrappers=1:nokey=0",
             str(audio_path),
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        if result.returncode != 0:
-            raise ValueError(f"ffprobe failed for {audio_path}: {result.stderr.strip()[:200]}")
+        try:
+            result = run_process_sync(
+                cmd,
+                label="ffprobe",
+                timeout_seconds=self.process_timeout_seconds,
+            )
+        except RuntimeError as exc:
+            raise ValueError(f"ffprobe failed for {audio_path}: {exc}") from exc
 
         info: dict[str, str] = {}
         for line in result.stdout.splitlines():
@@ -111,26 +121,29 @@ class AudioPreprocessor:
         if out_path.exists() and out_path.stat().st_size > 0:
             return out_path
 
-        subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-v",
-                "error",
-                "-i",
-                str(audio_path),
-                "-vn",
-                "-ac",
-                str(self.target_channels),
-                "-ar",
-                str(self.target_sr),
-                "-c:a",
-                "pcm_s16le",
-                str(out_path),
-            ],
-            check=True,
-            capture_output=True,
-        )
+        with atomic_write_path(out_path) as tmp_path:
+            run_process_sync(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-v",
+                    "error",
+                    "-i",
+                    str(audio_path),
+                    "-vn",
+                    "-ac",
+                    str(self.target_channels),
+                    "-ar",
+                    str(self.target_sr),
+                    "-c:a",
+                    "pcm_s16le",
+                    "-f",
+                    "wav",
+                    str(tmp_path),
+                ],
+                label="ffmpeg normalize",
+                timeout_seconds=self.process_timeout_seconds,
+            )
         return out_path
 
     def mix_to_wav(self, audio_paths: list[Path], label: str) -> Path:
@@ -159,10 +172,18 @@ class AudioPreprocessor:
                 "16000",
                 "-c:a",
                 "pcm_s16le",
+                "-f",
+                "wav",
                 str(out_path),
             ]
         )
-        subprocess.run(cmd, check=True, capture_output=True)
+        with atomic_write_path(out_path) as tmp_path:
+            cmd[-1] = str(tmp_path)
+            run_process_sync(
+                cmd,
+                label="ffmpeg mix",
+                timeout_seconds=self.process_timeout_seconds,
+            )
         return out_path
 
     def _cache_key(self, audio_path: Path, info: AudioInfo) -> str:

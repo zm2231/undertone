@@ -63,18 +63,20 @@ def register(subcommands: argparse._SubParsersAction) -> None:
 
 
 def youtube_ingest_cmd(args: argparse.Namespace) -> int:
+    config = config_for_args(args)
     connector = YouTubeConnector(
         download_dir=args.download_dir,
         yt_dlp_bin=args.yt_dlp_bin,
         audio_format=args.audio_format,
         include_playlist=args.include_playlist,
+        process_timeout_seconds=config.process_timeout_seconds,
     )
     asset = connector.fetch(args.url)
     if args.dry_run:
         payload = _asset_payload(asset)
         print(json.dumps(payload, separators=(",", ":")) if args.json else _render_asset(payload))
         return 0
-    return _ingest_asset(asset, args)
+    return _ingest_asset(asset, args, config=config)
 
 
 def podcast_list_cmd(args: argparse.Namespace) -> int:
@@ -95,17 +97,18 @@ def podcast_list_cmd(args: argparse.Namespace) -> int:
 
 
 def podcast_ingest_cmd(args: argparse.Namespace) -> int:
+    config = config_for_args(args)
     connector = PodcastConnector(download_dir=args.download_dir)
     asset = connector.fetch(args.source, episode=args.episode, title_contains=args.title_contains)
     if args.dry_run:
         payload = _asset_payload(asset)
         print(json.dumps(payload, separators=(",", ":")) if args.json else _render_asset(payload))
         return 0
-    return _ingest_asset(asset, args)
+    return _ingest_asset(asset, args, config=config)
 
 
-def _ingest_asset(asset: ConnectorAsset, args: argparse.Namespace) -> int:
-    config = config_for_args(args)
+def _ingest_asset(asset: ConnectorAsset, args: argparse.Namespace, *, config=None) -> int:
+    config = config or config_for_args(args)
     store = TranscriptStore(config.db_path)
     try:
         transcript_id = args.transcript_id or asset.transcript_id_hint

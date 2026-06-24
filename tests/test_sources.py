@@ -7,6 +7,7 @@ from undertone_audio.engines.base import RawTranscript
 from undertone_audio.schema import Segment, Speaker
 from undertone_audio.sources.meet import MEET_ADC_COMMAND
 from undertone_audio.sources.meet import MeetSource
+from undertone_audio.sources.meet import download_recording_mp4
 from undertone_audio.sources.quill import QuillSource
 
 
@@ -135,6 +136,33 @@ def test_meet_source_downloads_recording_before_text_fallback(tmp_path, monkeypa
     assert selection.source_metadata["drive_file_id"] == "drive123"
 
 
+def test_meet_recording_download_removes_partial_file(tmp_path, monkeypatch):
+    class FailingResponse:
+        def raise_for_status(self):
+            pass
+
+        def iter_content(self, chunk_size):
+            yield b"partial"
+            raise OSError("network dropped")
+
+    monkeypatch.setattr("undertone_audio.sources.meet._headers", lambda **kwargs: {})
+    monkeypatch.setattr(
+        "undertone_audio.sources.meet.requests.get",
+        lambda *args, **kwargs: FailingResponse(),
+    )
+
+    dest = tmp_path / "recording.mp4"
+    try:
+        download_recording_mp4("drive123", dest)
+    except OSError as exc:
+        assert "network dropped" in str(exc)
+    else:
+        raise AssertionError("download should fail")
+
+    assert not dest.exists()
+    assert not list(tmp_path.glob(".recording.mp4.*.tmp"))
+
+
 def test_meet_source_text_fallback_when_no_audio(tmp_path, monkeypatch):
     raw = RawTranscript(
         duration_ms=1000,
@@ -163,7 +191,7 @@ def test_quill_list_cli_reports_audio_candidates(tmp_path, monkeypatch, capsys):
     from undertone_audio.sources.quill import QuillMeeting
 
     class FakeQuillSource:
-        def __init__(self, db_path, meetings_dir):
+        def __init__(self, db_path, meetings_dir, **kwargs):
             pass
 
         def list_meetings(self, limit):
@@ -245,7 +273,7 @@ def test_quill_ingest_explicit_meeting_transcription_crash_exits_nonzero(tmp_pat
     meeting = QuillMeeting(meeting_id="m1", title="Title", word_count=5, combined=audio)
 
     class FakeQuillSource:
-        def __init__(self, db_path, meetings_dir):
+        def __init__(self, db_path, meetings_dir, **kwargs):
             pass
 
         def meeting(self, meeting_id):

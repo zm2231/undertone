@@ -10,6 +10,7 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 from undertone_audio.connectors.base import ConnectorAsset, ConnectorError, compact_metadata, default_download_dir, safe_stem
+from undertone_audio.processes import atomic_write_path
 
 
 @dataclass(frozen=True)
@@ -139,8 +140,10 @@ class PodcastConnector:
         if dest.exists() and dest.stat().st_size > 0:
             return dest
         with urllib.request.urlopen(url, timeout=120) as response:
-            data = response.read()
-        dest.write_bytes(data)
+            with atomic_write_path(dest) as tmp_path:
+                with tmp_path.open("wb") as fp:
+                    while chunk := response.read(1 << 20):
+                        fp.write(chunk)
         return dest
 
 
