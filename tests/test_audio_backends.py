@@ -315,16 +315,47 @@ def test_fluidaudio_pyannote_engine_has_no_local_path_configuration():
     assert not hasattr(engine, "pyannote_cli")
 
 
-def test_fluidaudio_pyannote_does_not_use_removed_torchaudio_info_api():
-    # torchaudio 2.x removed the legacy torchaudio.info / module-level metadata
-    # API. The backend must derive duration from the loaded waveform instead, or
-    # it raises AttributeError at run time (which import-only doctor misses).
-    import inspect
+def test_fluidaudio_pyannote_derives_duration_from_loaded_waveform(monkeypatch, tmp_path):
+    class FakeWaveform:
+        shape = (1, 32_000)
 
-    source = inspect.getsource(FluidAudioPyannoteEngine._run_pyannote)
-    assert "torchaudio.info" not in source
-    assert "torchaudio.load" in source
-    assert "waveform.shape[-1]" in source
+    class FakeTorchaudio:
+        @staticmethod
+        def load(path):
+            return FakeWaveform(), 16_000
+
+    class FakePipeline:
+        @classmethod
+        def from_pretrained(cls, *args, **kwargs):
+            return cls()
+
+        def __call__(self, payload):
+            assert payload["waveform"].shape[-1] == 32_000
+            assert payload["sample_rate"] == 16_000
+            return FakeAnnotation()
+
+    class FakeAnnotation:
+        speaker_diarization = None
+
+        def labels(self):
+            return []
+
+        def itertracks(self, yield_label=False):
+            return iter(())
+
+    engine = FluidAudioPyannoteEngine(
+        cli_path="/bin/echo",
+        pyannote_model="community-1",
+        pyannote_device="none",
+    )
+    monkeypatch.setattr(
+        "undertone_audio.engines.fluidaudio_pyannote._load_pyannote_modules",
+        lambda: (object(), FakeTorchaudio, FakePipeline),
+    )
+
+    data = engine._run_pyannote(tmp_path / "audio.wav")
+
+    assert data["durationSeconds"] == 2.0
 
 
 def test_overlap_mapping_uses_max_overlap():

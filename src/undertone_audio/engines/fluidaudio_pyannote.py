@@ -139,8 +139,6 @@ class FluidAudioPyannoteEngine(FluidAudioHybridEngine):
             waveform = waveform.mean(dim=0, keepdim=True)
 
         output = pipeline({"waveform": waveform, "sample_rate": sample_rate})
-        # Duration from the loaded waveform (torchaudio 2.x dropped the legacy
-        # module-level metadata API): frames / sample_rate.
         num_frames = waveform.shape[-1]
         duration_seconds = num_frames / sample_rate if sample_rate else 0.0
         return pyannote_output_to_sortformer_json(
