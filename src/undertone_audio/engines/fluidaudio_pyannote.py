@@ -27,9 +27,7 @@ log = logging.getLogger(__name__)
 
 DEFAULT_PYANNOTE_MODEL = "pyannote/speaker-diarization-community-1"
 DEFAULT_PYANNOTE_DEVICE = "auto"
-PYANNOTE_INSTALL_FIX = (
-    "Install pyannote support with `pip install 'undertone-audio[pyannote]'`."
-)
+PYANNOTE_INSTALL_FIX = "Install pyannote support with `pip install 'undertone-audio[pyannote]'`."
 PYANNOTE_MODEL_ALIASES = {
     "community-1": DEFAULT_PYANNOTE_MODEL,
     "3.1": "pyannote/speaker-diarization-3.1",
@@ -136,13 +134,15 @@ class FluidAudioPyannoteEngine(FluidAudioHybridEngine):
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            info = torchaudio.info(str(audio_path))
             waveform, sample_rate = torchaudio.load(str(audio_path))
         if waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
 
         output = pipeline({"waveform": waveform, "sample_rate": sample_rate})
-        duration_seconds = info.num_frames / info.sample_rate if info.sample_rate else 0.0
+        # Duration from the loaded waveform (torchaudio 2.x dropped the legacy
+        # module-level metadata API): frames / sample_rate.
+        num_frames = waveform.shape[-1]
+        duration_seconds = num_frames / sample_rate if sample_rate else 0.0
         return pyannote_output_to_sortformer_json(
             output,
             audio_path=audio_path,

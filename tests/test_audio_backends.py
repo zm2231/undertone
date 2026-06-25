@@ -315,6 +315,18 @@ def test_fluidaudio_pyannote_engine_has_no_local_path_configuration():
     assert not hasattr(engine, "pyannote_cli")
 
 
+def test_fluidaudio_pyannote_does_not_use_removed_torchaudio_info_api():
+    # torchaudio 2.x removed the legacy torchaudio.info / module-level metadata
+    # API. The backend must derive duration from the loaded waveform instead, or
+    # it raises AttributeError at run time (which import-only doctor misses).
+    import inspect
+
+    source = inspect.getsource(FluidAudioPyannoteEngine._run_pyannote)
+    assert "torchaudio.info" not in source
+    assert "torchaudio.load" in source
+    assert "waveform.shape[-1]" in source
+
+
 def test_overlap_mapping_uses_max_overlap():
     mapping = map_speakers_by_overlap(
         [{"speaker": "Speaker 0", "startTimeSeconds": 0.0, "endTimeSeconds": 3.0}],
