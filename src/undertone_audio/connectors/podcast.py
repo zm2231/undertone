@@ -24,8 +24,17 @@ class PodcastEpisode:
 
 
 class PodcastConnector:
+    name = "podcast"
+    source_kind = "podcast-audio"
+
     def __init__(self, *, download_dir: Path | None = None):
         self.download_dir = download_dir or default_download_dir() / "podcasts"
+
+    def matches(self, ref: str) -> bool:
+        parsed = urllib.parse.urlparse(ref)
+        if parsed.scheme not in {"http", "https", "file"}:
+            return False
+        return _looks_like_audio_url(ref) or parsed.path.lower().endswith((".xml", ".rss"))
 
     def fetch(
         self,

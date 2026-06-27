@@ -1,8 +1,3 @@
----
-name: undertone-exports
-description: Use when loading, searching, exporting, or choosing Undertone output formats and detail levels, especially when deciding whether acoustic metrics, word timings, or enrichment should be included.
----
-
 # Undertone Exports
 
 Use this skill for read paths and artifact generation from persisted Undertone transcripts.
@@ -13,6 +8,7 @@ Use this skill for read paths and artifact generation from persisted Undertone t
 undertone --db ./undertone.db load meeting-1
 undertone --db ./undertone.db list --limit 20
 undertone --db ./undertone.db search "next steps" --limit 20
+undertone schema transcript
 undertone --db ./undertone.db emit-ready meeting-1
 undertone --db ./undertone.db webhook-preview meeting-1
 ```
@@ -52,6 +48,10 @@ undertone --db ./undertone.db reenrich meeting-1 --turn-gap-ms 600 --output-form
 - `full`: complete transcript, per-word timings, enrichment, and acoustic metrics such as F0, jitter, shimmer, voiced duration, and articulation rate.
 
 Use `minimal` for human review or downstream systems that only need transcript text. Use `standard` for most CRM/workflow handoffs. Use `full` for analytics, QA, voice fingerprint inspection, or acoustic research.
+
+## Confidence Fields
+
+`words[].confidence` is FluidAudio ASR confidence. `segments[].asr_confidence` is the segment-level aggregate. `segments[].diarization_quality` is nullable and backend-specific: direct FluidAudio process quality on `fluidaudio-cli`, overlap-mapped FluidAudio process quality on `fluidaudio-hybrid`, and `null` on `fluidaudio-pyannote`.
 
 ## Source Metadata Boundary
 

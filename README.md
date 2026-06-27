@@ -23,6 +23,8 @@ Each transcript is stored with three layers.
 
 **Words and speakers.** Diarized, speaker-attributed text with per-segment and optional per-word timings, plus stable cross-recording speaker fingerprints.
 
+**Confidence.** FluidAudio word ASR confidence is preserved on `words[].confidence`, and Undertone derives `segments[].asr_confidence` as the average confidence of words in that segment. `segments[].diarization_quality` is nullable: `fluidaudio-cli` preserves FluidAudio process `qualityScore`; `fluidaudio-hybrid` overlap-maps process `qualityScore` onto Sortformer spans when possible; `fluidaudio-pyannote` reports `null` because pyannote's public diarization output does not expose per-span confidence.
+
 **Per-segment enrichment** (`SegmentEnrichment`):
 
 - `is_interruption`, `overlap_with_prev_ms`: who cut in, and by how much
@@ -149,9 +151,14 @@ List persisted speaker fingerprints:
 
 ```bash
 undertone --db ./undertone.db fingerprints
+undertone --db ./undertone.db fingerprints --format json
 undertone --db ./undertone.db fingerprints --unnamed --excerpts
 undertone --db ./undertone.db fingerprint-label VP-abc123 "Speaker Name"
+undertone --db ./undertone.db relabel --all
+undertone --db ./undertone.db fingerprint-adopt-model --dry-run
 ```
+
+`relabel` (alias `resolve-names`) re-stamps saved transcript speaker names from the voice fingerprint DB without ASR, diarization, or enrichment. Use it after naming a voice to update old exports.
 
 Inspect effective model and backend selections:
 
@@ -164,17 +171,63 @@ undertone --db ./undertone.db doctor --check-pyannote
 
 Source commands are always visible. There is no per-source enable switch; a source becomes ready when its optional dependency, credentials, or local data exists. `doctor` shows optional source readiness, and source commands print fix-oriented messages when a dependency is missing.
 
+Connectors can also be installed as Python entry-point plugins under the `undertone.connectors` group. A connector implements `matches(ref) -> bool` and `fetch(ref) -> ConnectorAsset`; Undertone discovers it at runtime:
+
+```bash
+undertone connector-list
+undertone --db ./undertone.db connector-ingest 'https://www.youtube.com/watch?v=...'
+```
+
+First-party compatibility commands such as `youtube-ingest` and `podcast-ingest` remain available.
+Third-party connectors are additive: built-in YouTube and podcast connectors stay discoverable, and connector name collisions fail loudly instead of shadowing a built-in.
+
 Common maintenance commands:
 
 ```bash
 undertone --db ./undertone.db reenrich meeting-1 --turn-gap-ms 600
 undertone --db ./undertone.db webhook-preview meeting-1
 undertone --db ./undertone.db fingerprint-label VP-abc123 "Speaker Name"
+undertone --db ./undertone.db fingerprint-export --output ./voiceprints.json
+undertone --db ./undertone.db fingerprint-adopt-model --dry-run
+undertone --db ./undertone.db fingerprint-adopt-model --yes
+undertone --db ./undertone.db fingerprint-merge VP-old VP-canonical --dry-run
+undertone --db ./undertone.db fingerprint-merge VP-old VP-canonical --yes
 undertone --db ./undertone.db stats
 undertone --db ./undertone.db delete meeting-1 --yes
 ```
 
+Fingerprint import, merge, and model adoption are explicit write operations. Use `--dry-run` first; writes require `--yes`. Before a merge, import, or adoption write, Undertone creates a timestamped `.bak` copy beside the SQLite DB.
+
+Speaker fingerprints are namespaced by the embedding model that produced their vectors. Changing `UNDERTONE_EMBEDDING_MODEL` or switching to the pyannote backend does not compare new embeddings against old model spaces. Legacy fingerprints from older Undertone DBs are dormant until explicitly adopted:
+
+```bash
+undertone --db ./undertone.db doctor
+undertone --db ./undertone.db fingerprint-adopt-model --dry-run
+undertone --db ./undertone.db fingerprint-adopt-model --yes
+```
+
+`fingerprint-adopt-model` is a provenance assertion for existing vectors, not a cross-model conversion. Use it only when the stored vectors were actually produced by the target model. A true model migration requires rerunning audio to rebuild embeddings.
+
 Ingest commands fail instead of silently overwriting an existing transcript id. Pass `--force` to overwrite or `--skip-existing` to no-op when the target id already exists.
+
+Long-running ingest commands support JSON progress events on stderr:
+
+```bash
+undertone --db ./undertone.db run-wav ./meeting.wav --progress json --output ./meeting.json
+```
+
+Stdout and `--output` remain reserved for transcript output.
+
+## Schemas
+
+Undertone publishes JSON Schemas for the transcript contract and connector asset contract:
+
+```bash
+undertone schema transcript --output ./undertone-transcript.schema.json
+undertone schema connector-asset --output ./undertone-connector-asset.schema.json
+```
+
+The transcript schema is versioned by `schema_version`. Connector plugins exchange `ConnectorAsset` shape version `1`.
 
 ## Engines
 
@@ -307,7 +360,7 @@ Precedence: explicit `--audio`, then a downloadable Meet Drive recording, then M
 No command needs a machine-specific absolute path. Defaults are portable:
 
 - database: `UNDERTONE_DB_PATH` or `--db` (default `./undertone.db`)
-- connector downloads: `UNDERTONE_DOWNLOAD_DIR`, `--download-dir`, `XDG_CACHE_HOME/undertone/downloads`, or `~/.cache/undertone/downloads`
+- connector downloads: `UNDERTONE_DOWNLOAD_DIR`, `XDG_CACHE_HOME/undertone/downloads`, or `~/.cache/undertone/downloads`; `--download-dir` is available on first-party source commands such as `youtube-ingest` and `podcast-ingest`
 - FluidAudio binary: `UNDERTONE_FLUIDAUDIO_CLI`, `FLUIDAUDIO_CLI`, or `fluidaudiocli` on `PATH`
 - external process timeout: `UNDERTONE_PROCESS_TIMEOUT_SECONDS` or `--process-timeout-seconds` on ingest commands (default `7200`; `0` disables)
 - pyannote backend selection: `UNDERTONE_PYANNOTE_MODEL` and `UNDERTONE_PYANNOTE_DEVICE`
@@ -506,15 +559,25 @@ undertone --db "$RUN_DIR/undertone.db" load youtube-Aq5WXmQQooo \
 
 ## Operator Skills
 
-Agent and operator workflows live under `skills/`:
+Undertone ships one Claude and Codex skill, `undertone`. It is a router: the skill body dispatches to a focused reference for each surface (ingest, connectors, meetings, exports, fingerprints, ops, and upgrades), and only the reference you need loads. One installed skill, one trigger, full depth on demand. It lives under `skills/undertone/` in the repo and in the wheel.
 
-- `undertone-ingest`: local audio, raw transcript JSON, model flags
-- `undertone-meetings-ingest`: Quill and Google Meet recordings, source precedence, text fallback
-- `undertone-connectors`: YouTube, podcasts, RSS feeds, direct media URLs, connector paths
-- `undertone-exports`: output formats, detail levels, search, load, webhook re-emission
-- `undertone-ops`: install, tests, package checks, models, fingerprints
+Install it as a Claude plugin so it updates with the marketplace:
 
-A Claude-compatible dispatcher lives at `.claude/skills/undertone/SKILL.md`.
+```bash
+/plugin marketplace add zm2231/undertone
+/plugin install undertone
+```
+
+Or copy it from a pip install into your Claude or Codex skill directories:
+
+```bash
+pip install undertone-audio
+undertone install-skills --target claude-user
+undertone install-skills --target codex
+undertone install-skills --target claude-project
+```
+
+`--target` is repeatable and defaults to `claude-user`. The copy is a snapshot, so re-run `install-skills` after upgrading undertone to refresh it, or use the plugin path to keep it current automatically.
 
 ## License
 

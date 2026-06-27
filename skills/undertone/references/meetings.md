@@ -1,8 +1,3 @@
----
-name: undertone-meetings-ingest
-description: Use when ingesting meeting recordings into Undertone from Quill or Google Meet, including source precedence, multi-account Google auth, local recording overrides, and text fallback behavior when no audio exists.
----
-
 # Undertone Meetings Ingest
 
 Use this skill for meeting-source ingest. Quill and Google Meet can provide useful provenance, but audio wins whenever it exists.

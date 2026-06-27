@@ -1,4 +1,5 @@
 from undertone_audio.diarization.fingerprint import SpeakerFingerprintStore
+from undertone_audio.diarization.merge import merge_adjacent_turns
 from undertone_audio.diarization.merge_speakers import collapse_overdetected_speakers
 from undertone_audio.engines.fluidaudio_cli import (
     FluidAudioCLIEngine,
@@ -45,6 +46,86 @@ def test_fluidaudio_cli_merge_preserves_embeddings_and_words():
     assert raw.speakers == [Speaker(speaker_id="S1", embedding=[1.0, 0.0])]
     assert raw.segments[0].text == "hello world"
     assert raw.segments[0].words[0].confidence == 0.9
+    assert raw.segments[0].diarization_quality is None
+
+
+def test_fluidaudio_cli_merge_preserves_process_quality_score():
+    raw = merge_transcribe_and_diarize(
+        {
+            "wordTimings": [
+                {"word": "quality", "startTime": 0.1, "endTime": 0.3, "confidence": 0.8},
+            ]
+        },
+        {
+            "durationSeconds": 1.0,
+            "segments": [
+                {
+                    "speakerId": "S1",
+                    "startTimeSeconds": 0.0,
+                    "endTimeSeconds": 1.0,
+                    "embedding": [1.0, 0.0],
+                    "qualityScore": 0.72,
+                }
+            ],
+        },
+    )
+
+    assert raw.segments[0].diarization_quality == 0.72
+
+
+def test_merge_adjacent_turns_aggregates_diarization_quality_by_duration():
+    merged = merge_adjacent_turns(
+        [
+            Segment(
+                segment_id="s1",
+                speaker_id="S1",
+                start_ms=0,
+                end_ms=1000,
+                text="low",
+                diarization_quality=0.1,
+            ),
+            Segment(
+                segment_id="s2",
+                speaker_id="S1",
+                start_ms=1000,
+                end_ms=3000,
+                text="high",
+                diarization_quality=0.9,
+            ),
+        ],
+        gap_threshold_ms=0,
+    )
+
+    assert len(merged) == 1
+    assert merged[0].text == "low high"
+    assert merged[0].diarization_quality == (0.1 * 1000 + 0.9 * 2000) / 3000
+
+
+def test_merge_adjacent_turns_clears_diarization_quality_when_partial():
+    merged = merge_adjacent_turns(
+        [
+            Segment(
+                segment_id="s1",
+                speaker_id="S1",
+                start_ms=0,
+                end_ms=1000,
+                text="known",
+                diarization_quality=0.8,
+            ),
+            Segment(
+                segment_id="s2",
+                speaker_id="S1",
+                start_ms=1000,
+                end_ms=2000,
+                text="unknown",
+                diarization_quality=None,
+            ),
+        ],
+        gap_threshold_ms=0,
+    )
+
+    assert len(merged) == 1
+    assert merged[0].diarization_quality is None
 
 
 def test_fluidaudio_cli_custom_model_selection_reaches_commands(tmp_path):
@@ -95,12 +176,14 @@ def test_fluidaudio_hybrid_maps_sortformer_speakers_to_process_embeddings():
                     "startTimeSeconds": 0.0,
                     "endTimeSeconds": 0.9,
                     "embedding": [1.0, 0.0],
+                    "qualityScore": 0.25,
                 },
                 {
                     "speakerId": "S2",
                     "startTimeSeconds": 1.0,
                     "endTimeSeconds": 2.0,
                     "embedding": [0.0, 1.0],
+                    "qualityScore": 0.75,
                 },
             ]
         },
@@ -118,6 +201,7 @@ def test_fluidaudio_hybrid_maps_sortformer_speakers_to_process_embeddings():
     assert raw.speakers[0].embedding == [1.0, 0.0]
     assert raw.speakers[1].embedding == [0.0, 1.0]
     assert [segment.text for segment in raw.segments] == ["first", "second"]
+    assert [segment.diarization_quality for segment in raw.segments] == [0.25, 0.75]
 
 
 def test_fluidaudio_hybrid_falls_back_to_process_when_sortformer_empty():
@@ -415,6 +499,32 @@ def test_fingerprint_store_assigns_and_updates_mean(tmp_path):
             (speakers[0].fingerprint_id,),
         ).fetchone()
         assert row["sample_count"] == 2
+    finally:
+        store.close()
+
+
+def test_fingerprint_update_mean_is_model_guarded(tmp_path):
+    db = tmp_path / "undertone.db"
+    store = TranscriptStore(db)
+    try:
+        model_a = SpeakerFingerprintStore(db, similarity_threshold=0.95, embedding_model="model-a")
+        speakers, plan = model_a.assign_fingerprints(
+            [Speaker(speaker_id="S1", embedding=[1.0, 0.0])],
+            persist=False,
+            speaker_durations_ms={"S1": 16000},
+        )
+        fingerprint_id = speakers[0].fingerprint_id
+        plan.commit()
+
+        model_b = SpeakerFingerprintStore(db, similarity_threshold=0.0, embedding_model="model-b")
+        model_b._update_mean(store._conn, fingerprint_id, [0.0, 1.0])
+
+        row = store._conn.execute(
+            "SELECT sample_count, embedding_model FROM speaker_fingerprints WHERE fingerprint_id = ?",
+            (fingerprint_id,),
+        ).fetchone()
+        assert row["sample_count"] == 1
+        assert row["embedding_model"] == "model-a"
     finally:
         store.close()
 

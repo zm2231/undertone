@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -12,8 +13,10 @@ from undertone_audio.commands.common import (
     add_audio_pipeline_flags,
     add_duplicate_flags,
     config_for_args,
+    emit_progress,
     emit_transcript,
     guard_existing_transcript,
+    progress_warning_sink,
 )
 from undertone_audio.engines import create_engine
 from undertone_audio.pipeline import AudioPipeline, _audio_format
@@ -100,6 +103,14 @@ def quill_list_cmd(args: argparse.Namespace) -> int:
 
 def quill_ingest_cmd(args: argparse.Namespace) -> int:
     config = config_for_args(args)
+    if args.meeting_id and not args.dry_run:
+        store = TranscriptStore(config.db_path)
+        try:
+            if guard_existing_transcript(store, args.meeting_id, args):
+                emit_progress(args, "skipped", transcript_id=args.meeting_id, reason="exists")
+                return 0
+        finally:
+            store.close()
     source = QuillSource(
         db_path=args.quill_db,
         meetings_dir=args.meetings_dir,
@@ -126,6 +137,7 @@ def quill_ingest_cmd(args: argparse.Namespace) -> int:
         pending = []
         for meeting in meetings:
             if guard_existing_transcript(store, meeting.meeting_id, args, quiet=True):
+                emit_progress(args, "skipped", transcript_id=meeting.meeting_id, reason="exists")
                 report["skipped"].append({"meeting_id": meeting.meeting_id, "reason": "exists"})
                 continue
             try:
@@ -135,14 +147,44 @@ def quill_ingest_cmd(args: argparse.Namespace) -> int:
                 continue
             pending.append((meeting, audio_path, hydrated))
         if not pending:
+            if args.meeting_id and report["skipped"]:
+                if getattr(args, "progress", "off") == "json":
+                    first = report["skipped"][0]
+                    raise RuntimeError(first.get("error") or first.get("reason") or "quill ingest failed")
+                print(
+                    json.dumps(report, separators=(",", ":")) if args.json else _render_quill_report(report),
+                    file=sys.stderr,
+                )
+                return 1
             print(json.dumps(report, separators=(",", ":")) if args.json else _render_quill_report(report))
             return 0
         engine = create_engine(args.engine, config)
-        pipeline = AudioPipeline(store=store, engine=engine, config=config)
+        pipeline = AudioPipeline(
+            store=store,
+            engine=engine,
+            config=config,
+            warning_sink=progress_warning_sink(args),
+        )
         real_failures = 0
         for meeting, audio_path, hydrated in pending:
             try:
+                emit_progress(
+                    args,
+                    "start",
+                    command="quill-ingest",
+                    transcript_id=meeting.meeting_id,
+                    audio_path=str(audio_path),
+                )
                 raw = asyncio.run(engine.transcribe(audio_path))
+                emit_progress(
+                    args,
+                    "transcribed",
+                    transcript_id=meeting.meeting_id,
+                    duration_ms=raw.duration_ms,
+                    segments=len(raw.segments),
+                    speakers=len(raw.speakers),
+                )
+                emit_progress(args, "finalizing", transcript_id=meeting.meeting_id)
                 transcript = pipeline.finalize_raw(
                     raw,
                     transcript_id=meeting.meeting_id,
@@ -154,6 +196,7 @@ def quill_ingest_cmd(args: argparse.Namespace) -> int:
                     audio_format=_audio_format(audio_path),
                     audio_path=audio_path,
                 )
+                emit_progress(args, "saved", transcript_id=transcript.transcript_id)
             except Exception as exc:
                 report["skipped"].append({"meeting_id": meeting.meeting_id, "error": str(exc)})
                 real_failures += 1
@@ -161,7 +204,11 @@ def quill_ingest_cmd(args: argparse.Namespace) -> int:
             report["ingested"] += 1
             if args.meeting_id:
                 emit_transcript(transcript, args, raw=raw)
-        print(json.dumps(report, separators=(",", ":")) if args.json else _render_quill_report(report))
+        if not args.meeting_id or real_failures:
+            print(
+                json.dumps(report, separators=(",", ":")) if args.json else _render_quill_report(report),
+                file=sys.stderr if args.meeting_id else sys.stdout,
+            )
         return 1 if real_failures else 0
     finally:
         store.close()
@@ -169,6 +216,14 @@ def quill_ingest_cmd(args: argparse.Namespace) -> int:
 
 def meet_ingest_cmd(args: argparse.Namespace) -> int:
     config = config_for_args(args)
+    transcript_id = args.transcript_id or "meet-" + _stable_id(args.conference_record)
+    store = TranscriptStore(config.db_path)
+    try:
+        if guard_existing_transcript(store, transcript_id, args):
+            emit_progress(args, "skipped", transcript_id=transcript_id, reason="exists")
+            return 0
+    finally:
+        store.close()
     source = MeetSource(
         download_dir=args.download_dir,
         preprocessor=AudioPreprocessor(process_timeout_seconds=config.process_timeout_seconds),
@@ -180,14 +235,32 @@ def meet_ingest_cmd(args: argparse.Namespace) -> int:
         local_audio=args.audio,
         allow_text_fallback=not args.no_text_fallback,
     )
-    transcript_id = args.transcript_id or "meet-" + _stable_id(args.conference_record)
     store = TranscriptStore(config.db_path)
     try:
-        if guard_existing_transcript(store, transcript_id, args):
-            return 0
-        pipeline = AudioPipeline(store=store, engine=create_engine(args.engine, config), config=config)
+        pipeline = AudioPipeline(
+            store=store,
+            engine=create_engine(args.engine, config),
+            config=config,
+            warning_sink=progress_warning_sink(args),
+        )
         if selection.audio_path is not None:
+            emit_progress(
+                args,
+                "start",
+                command="meet-ingest",
+                transcript_id=transcript_id,
+                audio_path=str(selection.audio_path),
+            )
             raw = asyncio.run(pipeline.engine.transcribe(selection.audio_path))
+            emit_progress(
+                args,
+                "transcribed",
+                transcript_id=transcript_id,
+                duration_ms=raw.duration_ms,
+                segments=len(raw.segments),
+                speakers=len(raw.speakers),
+            )
+            emit_progress(args, "finalizing", transcript_id=transcript_id)
             transcript = pipeline.finalize_raw(
                 raw,
                 transcript_id=transcript_id,
@@ -198,12 +271,19 @@ def meet_ingest_cmd(args: argparse.Namespace) -> int:
                 audio_format=_audio_format(selection.audio_path),
                 audio_path=selection.audio_path,
             )
+            emit_progress(args, "saved", transcript_id=transcript.transcript_id)
             emit_transcript(transcript, args, raw=raw)
             return 0
         if selection.raw_fallback is None:
             raise ValueError("Meet source returned neither audio nor text fallback")
         fallback_config = replace(config, min_talk_seconds=0)
-        pipeline = AudioPipeline(store=store, engine=pipeline.engine, config=fallback_config)
+        pipeline = AudioPipeline(
+            store=store,
+            engine=pipeline.engine,
+            config=fallback_config,
+            warning_sink=progress_warning_sink(args),
+        )
+        emit_progress(args, "finalizing", transcript_id=transcript_id, fallback="text")
         transcript = pipeline.finalize_raw(
             selection.raw_fallback,
             transcript_id=transcript_id,
@@ -216,6 +296,7 @@ def meet_ingest_cmd(args: argparse.Namespace) -> int:
             diarization_error_detail="No local or downloadable Meet recording was available.",
             apply_speaker_processing=True,
         )
+        emit_progress(args, "saved", transcript_id=transcript.transcript_id)
         emit_transcript(transcript, args, raw=selection.raw_fallback)
         return 0
     finally:

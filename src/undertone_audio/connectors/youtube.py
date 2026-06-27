@@ -19,6 +19,9 @@ from undertone_audio.processes import process_timeout_from_env
 
 
 class YouTubeConnector:
+    name = "youtube"
+    source_kind = "youtube-audio"
+
     def __init__(
         self,
         *,
@@ -35,6 +38,11 @@ class YouTubeConnector:
         self.process_timeout_seconds = (
             process_timeout_from_env() if process_timeout_seconds is None else process_timeout_seconds
         )
+
+    def matches(self, ref: str) -> bool:
+        parsed = urlparse(ref)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        return host == "youtube.com" or host.endswith(".youtube.com") or host == "youtu.be"
 
     def fetch(self, url: str) -> ConnectorAsset:
         binary = ensure_binary(self.yt_dlp_bin)
@@ -119,7 +127,10 @@ class YouTubeConnector:
 
 def _video_id_hint(url: str) -> str | None:
     parsed = urlparse(url)
-    if parsed.netloc.endswith("youtu.be"):
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if host == "youtu.be":
         return parsed.path.strip("/") or None
+    if host != "youtube.com" and not host.endswith(".youtube.com"):
+        return None
     values = parse_qs(parsed.query).get("v")
     return values[0] if values else None

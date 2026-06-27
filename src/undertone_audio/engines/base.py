@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from undertone_audio.schema import Segment, Speaker
 
@@ -14,6 +14,7 @@ class RawTranscript(BaseModel):
     speakers: list[Speaker]
     segments: list[Segment]
     engine: str
+    model_versions: dict = Field(default_factory=dict)
 
 
 class TranscriptionEngine(Protocol):

@@ -46,9 +46,22 @@ CREATE TABLE IF NOT EXISTS speaker_fingerprints (
     embedding BLOB NOT NULL,
     display_name TEXT,
     sample_count INTEGER NOT NULL DEFAULT 1,
+    embedding_model TEXT,
+    embedding_dimension INTEGER,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS fingerprint_sources (
+    fingerprint_id TEXT NOT NULL REFERENCES speaker_fingerprints(fingerprint_id) ON DELETE CASCADE,
+    transcript_id TEXT NOT NULL REFERENCES transcripts(transcript_id) ON DELETE CASCADE,
+    speaker_id TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (fingerprint_id, transcript_id, speaker_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fingerprint_sources_transcript
+    ON fingerprint_sources(transcript_id, speaker_id);
 
 CREATE TABLE IF NOT EXISTS segments (
     segment_id TEXT NOT NULL,
@@ -57,6 +70,8 @@ CREATE TABLE IF NOT EXISTS segments (
     start_ms INTEGER NOT NULL,
     end_ms INTEGER NOT NULL,
     text TEXT NOT NULL,
+    asr_confidence REAL,
+    diarization_quality REAL,
     sentiment TEXT,
     sentiment_confidence REAL,
     tone_tags TEXT NOT NULL DEFAULT '[]',

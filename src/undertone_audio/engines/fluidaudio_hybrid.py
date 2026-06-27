@@ -148,6 +148,7 @@ def merge_hybrid(
             "speakerId": segment["speaker"],
             "startTimeSeconds": segment["startTimeSeconds"],
             "endTimeSeconds": segment["endTimeSeconds"],
+            "qualityScore": _overlap_quality(segment, process_segments),
         }
         for segment in sort_segments
     ]
@@ -192,3 +193,26 @@ def map_speakers_by_overlap(
         candidates.sort(key=lambda item: -item[1])
         mapping[sort_label] = candidates[0][0]
     return mapping
+
+
+def _overlap_quality(sort_segment: dict, process_segments: list[dict]) -> float | None:
+    weighted_quality = 0.0
+    overlap_total = 0.0
+    s_start = sort_segment["startTimeSeconds"]
+    s_end = sort_segment["endTimeSeconds"]
+    for process_segment in process_segments:
+        quality = process_segment.get("qualityScore")
+        if quality is None:
+            continue
+        p_start = process_segment["startTimeSeconds"]
+        p_end = process_segment["endTimeSeconds"]
+        if p_end <= s_start or p_start >= s_end:
+            continue
+        overlap_s = min(s_end, p_end) - max(s_start, p_start)
+        if overlap_s <= 0:
+            continue
+        weighted_quality += overlap_s * float(quality)
+        overlap_total += overlap_s
+    if overlap_total == 0:
+        return None
+    return weighted_quality / overlap_total

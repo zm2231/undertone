@@ -3,6 +3,7 @@ import sqlite3
 import pytest
 
 from undertone_audio import EnrichedTranscript, Segment, Speaker, TranscriptMetadata
+from undertone_audio.engines.base import RawTranscript
 from undertone_audio.storage import TranscriptStore
 
 
@@ -34,6 +35,8 @@ def test_store_roundtrips_raw_transcript_without_attribution_tables(tmp_path):
         assert loaded.speakers[0].fingerprint_id == "VP-1"
         assert loaded.speakers[0].embedding == [0.1, 0.2]
         assert loaded.segments[0].text == "hello"
+        assert loaded.segments[0].asr_confidence is None
+        assert loaded.segments[0].diarization_quality is None
         assert store.search("hello")[0][:3] == ("meeting-1", "seg1", "S1")
 
         table_names = {
@@ -51,6 +54,36 @@ def test_store_roundtrips_raw_transcript_without_attribution_tables(tmp_path):
         }
         assert "scope" not in columns
         assert "scope_source" not in columns
+    finally:
+        store.close()
+
+
+def test_store_save_preserves_existing_raw_transcript(tmp_path):
+    store = TranscriptStore(tmp_path / "undertone.db")
+    try:
+        transcript = EnrichedTranscript(
+            transcript_id="meeting-raw",
+            metadata=TranscriptMetadata(duration_ms=1000, engine="test"),
+            speakers=[Speaker(speaker_id="S1")],
+            segments=[Segment(segment_id="seg1", speaker_id="S1", start_ms=0, end_ms=1000, text="hello")],
+        )
+        raw = RawTranscript(
+            duration_ms=1000,
+            language="en",
+            engine="fixture",
+            speakers=[Speaker(speaker_id="S1")],
+            segments=[Segment(segment_id="seg1", speaker_id="S1", start_ms=0, end_ms=1000, text="hello")],
+        )
+        store.save_with_fingerprint_plan(transcript, None, raw_transcript=raw)
+        assert store.load_raw("meeting-raw") is not None
+
+        loaded = store.load("meeting-raw")
+        assert loaded is not None
+        store.save(loaded)
+
+        preserved = store.load_raw("meeting-raw")
+        assert preserved is not None
+        assert preserved.segments[0].text == "hello"
     finally:
         store.close()
 
@@ -97,6 +130,7 @@ def test_fresh_database_has_only_core_tables(tmp_path):
         "transcripts",
         "speakers",
         "speaker_fingerprints",
+        "fingerprint_sources",
         "segments",
         "speaker_metrics",
         "segments_fts",
@@ -198,10 +232,13 @@ def test_existing_skeleton_database_repairs_added_audio_tables(tmp_path):
             )
         }
         columns = {row[1] for row in store._conn.execute("PRAGMA table_info(transcripts)")}
+        segment_columns = {row[1] for row in store._conn.execute("PRAGMA table_info(segments)")}
         assert "speaker_fingerprints" in tables
         assert "segments_fts" in tables
         assert "asr_backend" in columns
         assert "audio_format" in columns
+        assert "asr_confidence" in segment_columns
+        assert "diarization_quality" in segment_columns
     finally:
         store.close()
 

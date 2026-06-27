@@ -1,0 +1,18 @@
+{
+  "name": "undertone",
+  "owner": { "name": "Zain Merchant", "url": "https://github.com/zm2231" },
+  "metadata": {
+    "description": "Undertone: local, on-device audio transcripts with speaker fingerprinting.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "undertone",
+      "source": "./",
+      "description": "On-device audio transcripts you own. Ingest local files, YouTube, podcasts, RSS, Quill, or Google Meet, run local ASR, diarization, and speaker fingerprinting, then browse, search, and export. One skill that routes to a reference per surface.",
+      "version": "0.1.0",
+      "category": "productivity",
+      "keywords": ["audio", "transcription", "diarization", "speaker-fingerprints", "on-device"]
+    }
+  ]
+}

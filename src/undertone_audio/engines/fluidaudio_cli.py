@@ -360,6 +360,7 @@ def words_to_segments(word_timings: list[dict], diar_segments: list[dict]) -> li
                 start_ms=int(span["startTimeSeconds"] * 1000),
                 end_ms=int(span["endTimeSeconds"] * 1000),
                 text=" ".join(word.text for word in words),
+                diarization_quality=span.get("qualityScore"),
                 words=words,
             )
         )

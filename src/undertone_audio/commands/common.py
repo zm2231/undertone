@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from undertone_audio.config import Config, load as load_config
@@ -43,6 +44,12 @@ def add_audio_pipeline_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output-format", choices=sorted(OUTPUT_FORMATS))
     parser.add_argument("--output-detail", choices=sorted(OUTPUT_DETAIL_LEVELS))
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--progress",
+        choices=["off", "json"],
+        default="off",
+        help="Emit long-running job progress events. JSON events are written to stderr.",
+    )
 
 
 def add_duplicate_flags(parser: argparse.ArgumentParser) -> None:
@@ -129,16 +136,30 @@ def guard_existing_transcript(
         return False
     if getattr(args, "skip_existing", False):
         if not quiet:
-            print(
-                json.dumps(
-                    {"transcript_id": transcript_id, "skipped": True, "reason": "exists"},
-                    separators=(",", ":"),
-                )
+            payload = json.dumps(
+                {"transcript_id": transcript_id, "skipped": True, "reason": "exists"},
+                separators=(",", ":"),
             )
+            if getattr(args, "progress", "off") != "json":
+                print(payload, file=sys.stderr if getattr(args, "output", None) else sys.stdout)
         return True
     if getattr(args, "force", False):
         return False
     raise ValueError(f"transcript already exists: {transcript_id}; pass --force or --skip-existing")
+
+
+def emit_progress(args: argparse.Namespace, event: str, **fields) -> None:
+    if getattr(args, "progress", "off") != "json":
+        return
+    payload = {"event": event, **fields}
+    print(json.dumps(payload, separators=(",", ":"), default=str), file=sys.stderr, flush=True)
+
+
+def progress_warning_sink(args: argparse.Namespace):
+    def _sink(name: str, payload: dict) -> None:
+        emit_progress(args, "warning", warning=name, **payload)
+
+    return _sink
 
 
 def output_format(args: argparse.Namespace) -> str:

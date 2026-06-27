@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import uuid
 import wave
+import logging
 from datetime import datetime
 from pathlib import Path
+from typing import Callable, Any
 
 from undertone_audio.analytics import (
     annotate_fillers,
@@ -32,6 +34,8 @@ from undertone_audio.schema import (
 from undertone_audio.storage import TranscriptStore
 from undertone_audio.webhooks import emit_transcript_ready
 
+log = logging.getLogger(__name__)
+
 
 class AudioPipeline:
     def __init__(
@@ -40,6 +44,7 @@ class AudioPipeline:
         engine: TranscriptionEngine | None = None,
         config: Config | None = None,
         fingerprint_store: SpeakerFingerprintStore | None = None,
+        warning_sink: Callable[[str, dict[str, Any]], None] | None = None,
     ):
         self.store = store
         self.engine = engine
@@ -47,7 +52,9 @@ class AudioPipeline:
         self.fingerprint_store = fingerprint_store or SpeakerFingerprintStore(
             self.store.db_path,
             similarity_threshold=self.config.fingerprint_similarity_threshold,
+            embedding_model=effective_fingerprint_embedding_model(self.config),
         )
+        self.warning_sink = warning_sink
 
     async def run(
         self,
@@ -106,8 +113,33 @@ class AudioPipeline:
         raw_transcript = raw.model_copy(deep=True)
         fingerprint_plan = None
         safe_source_metadata = sanitize_source_metadata(source_metadata)
+        resolved_transcript_id = transcript_id or str(uuid.uuid4())
+        active_embedding_model = embedding_backend or fingerprint_embedding_model_for_raw(
+            raw,
+            self.config,
+        )
 
         if apply_speaker_processing:
+            self.fingerprint_store.embedding_model = active_embedding_model
+            fingerprint_counts = self.store.fingerprint_model_counts(
+                active_embedding_model
+            )
+            if fingerprint_counts["legacy"] or fingerprint_counts["incompatible"]:
+                warning_payload = {
+                    "legacy": fingerprint_counts["legacy"],
+                    "incompatible": fingerprint_counts["incompatible"],
+                    "active_embedding_model": fingerprint_counts["active_embedding_model"],
+                    "fix": "Run `undertone fingerprint-adopt-model --dry-run` to inspect.",
+                }
+                log.warning(
+                    "%d legacy and %d incompatible voice fingerprints are dormant for model %r; "
+                    "run `undertone fingerprint-adopt-model --dry-run` to inspect.",
+                    fingerprint_counts["legacy"],
+                    fingerprint_counts["incompatible"],
+                    fingerprint_counts["active_embedding_model"],
+                )
+                if self.warning_sink is not None:
+                    self.warning_sink("fingerprint_models", warning_payload)
             speakers, segments, _report = collapse_overdetected_speakers(
                 speakers,
                 segments,
@@ -122,11 +154,21 @@ class AudioPipeline:
                 annotate_fillers(segments)
             if self.config.enable_linguistic:
                 annotate_linguistic(segments)
+            _annotate_asr_confidence(segments)
             speakers, fingerprint_plan = self.fingerprint_store.assign_fingerprints(
                 speakers,
                 persist=False,
                 speaker_durations_ms=talk_time_per_speaker(segments),
             )
+            for speaker in speakers:
+                if speaker.fingerprint_id:
+                    fingerprint_plan.sources.append(
+                        (
+                            speaker.fingerprint_id,
+                            resolved_transcript_id,
+                            speaker.speaker_id,
+                        )
+                    )
 
         inferred_diarization_state = diarization_state
         if inferred_diarization_state is None:
@@ -153,9 +195,18 @@ class AudioPipeline:
                 segments,
                 required=voice_mode in {"required", "require", "on", "true", "1"},
             )
+        resolved_model_versions = (
+            model_versions
+            if model_versions is not None
+            else _model_versions_with_raw(
+                raw,
+                self.config,
+                embedding_model=active_embedding_model,
+            )
+        )
 
         transcript = EnrichedTranscript(
-            transcript_id=transcript_id or str(uuid.uuid4()),
+            transcript_id=resolved_transcript_id,
             metadata=TranscriptMetadata(
                 source_path=source_path,
                 source_url=source_url,
@@ -170,10 +221,10 @@ class AudioPipeline:
                 diarization_backend=diarization_backend
                 or _diarization_backend(raw.engine, self.config),
                 vad_backend=vad_backend or self.config.vad_model,
-                embedding_backend=embedding_backend or _embedding_backend(raw.engine, self.config),
+                embedding_backend=active_embedding_model,
                 fingerprint_backend=fingerprint_backend
                 or (self.config.fingerprint_backend if apply_speaker_processing else None),
-                model_versions=model_versions or _model_versions(raw.engine, self.config),
+                model_versions=resolved_model_versions,
                 audio_format=audio_format or {},
                 expected_speaker_count=expected_speaker_count,
                 expected_speaker_source=expected_speaker_source,
@@ -256,6 +307,16 @@ def _asr_backend(engine: str, config: Config) -> str | None:
     return None
 
 
+def _annotate_asr_confidence(segments) -> None:
+    for segment in segments:
+        confidences = [
+            word.confidence for word in segment.words if word.confidence is not None
+        ]
+        segment.asr_confidence = (
+            sum(confidences) / len(confidences) if confidences else None
+        )
+
+
 def _diarization_backend(engine: str, config: Config) -> str | None:
     if engine == "fluidaudio-pyannote":
         from undertone_audio.engines.fluidaudio_pyannote import resolve_pyannote_model
@@ -276,6 +337,21 @@ def _embedding_backend(engine: str, config: Config) -> str:
     return config.embedding_model
 
 
+def fingerprint_embedding_model_for_engine(engine: str, config: Config) -> str:
+    return _embedding_backend(engine, config)
+
+
+def fingerprint_embedding_model_for_raw(raw: RawTranscript, config: Config) -> str:
+    embedding = raw.model_versions.get("embedding") if raw.model_versions else None
+    if isinstance(embedding, str) and embedding.strip():
+        return embedding
+    return fingerprint_embedding_model_for_engine(raw.engine, config)
+
+
+def effective_fingerprint_embedding_model(config: Config) -> str:
+    return fingerprint_embedding_model_for_engine(config.default_engine, config)
+
+
 def _model_versions(engine: str, config: Config) -> dict:
     if not engine.startswith("fluidaudio"):
         return {}
@@ -286,6 +362,22 @@ def _model_versions(engine: str, config: Config) -> dict:
         "embedding": _embedding_backend(engine, config),
         "fingerprint": config.fingerprint_backend,
     }
+
+
+def _model_versions_with_raw(
+    raw: RawTranscript,
+    config: Config,
+    *,
+    embedding_model: str,
+) -> dict:
+    resolved = _model_versions(raw.engine, config)
+    if raw.model_versions:
+        for key, value in raw.model_versions.items():
+            if key == "embedding" and not (isinstance(value, str) and value.strip()):
+                continue
+            resolved[key] = value
+    resolved["embedding"] = embedding_model
+    return resolved
 
 
 def _audio_format(audio_path: str | Path) -> dict:

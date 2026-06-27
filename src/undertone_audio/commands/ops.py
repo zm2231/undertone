@@ -4,10 +4,13 @@ import argparse
 import asyncio
 import json
 import shutil
+from pathlib import Path
 
 from undertone_audio.commands.common import config_for_args, db_path
 from undertone_audio.engines import create_engine
 from undertone_audio.engines.fluidaudio_pyannote import pyannote_status
+from undertone_audio.pipeline import effective_fingerprint_embedding_model
+from undertone_audio.schema import ConnectorAssetSchema, EnrichedTranscript
 from undertone_audio.source_readiness import source_statuses
 from undertone_audio.sources.meet import meet_auth_check
 from undertone_audio.storage import TranscriptStore
@@ -33,6 +36,16 @@ def register(subcommands: argparse._SubParsersAction) -> None:
     sources.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     sources.set_defaults(func=sources_cmd)
 
+    schema = subcommands.add_parser("schema", help="Print published JSON Schemas.")
+    schema.add_argument(
+        "name",
+        choices=["transcript", "connector-asset"],
+        nargs="?",
+        default="transcript",
+    )
+    schema.add_argument("--output", type=Path, help="Write schema JSON to this path.")
+    schema.set_defaults(func=schema_cmd)
+
     doctor = subcommands.add_parser("doctor", help="Run local undertone preflight checks.")
     doctor.add_argument("--check-yt-dlp", action="store_true")
     doctor.add_argument("--check-meet", action="store_true")
@@ -41,9 +54,32 @@ def register(subcommands: argparse._SubParsersAction) -> None:
     doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     doctor.set_defaults(func=doctor_cmd)
 
+    install_skills = subcommands.add_parser(
+        "install-skills",
+        help="Copy the bundled undertone skill into Claude or Codex skills directories.",
+    )
+    install_skills.add_argument(
+        "--target",
+        action="append",
+        choices=["claude-user", "claude-project", "codex"],
+        help="Install target (repeatable). Default: claude-user.",
+    )
+    install_skills.add_argument(
+        "--force", action="store_true", help="Overwrite an existing installed skill."
+    )
+    install_skills.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    install_skills.set_defaults(func=install_skills_cmd)
+
 
 def models_cmd(args: argparse.Namespace) -> int:
     config = config_for_args(args)
+    store = TranscriptStore(config.db_path)
+    try:
+        fingerprint_models = store.fingerprint_model_counts(
+            effective_fingerprint_embedding_model(config)
+        )
+    finally:
+        store.close()
     payload = {
         "engine": config.default_engine,
         "asr_model": config.asr_model,
@@ -53,6 +89,7 @@ def models_cmd(args: argparse.Namespace) -> int:
         "pyannote_model": config.pyannote_model,
         "pyannote_device": config.pyannote_device,
         "fingerprint_backend": config.fingerprint_backend,
+        "fingerprint_models": fingerprint_models,
         "voice_metrics": config.voice_metrics,
         "output_format": config.default_output_format,
         "output_detail": config.default_output_detail,
@@ -96,9 +133,12 @@ def delete_cmd(args: argparse.Namespace) -> int:
 
 
 def stats_cmd(args: argparse.Namespace) -> int:
-    store = TranscriptStore(db_path(args))
+    config = config_for_args(args)
+    store = TranscriptStore(config.db_path)
     try:
-        payload = store.stats()
+        payload = store.stats(
+            active_embedding_model=effective_fingerprint_embedding_model(config)
+        )
         print(json.dumps(payload, separators=(",", ":")) if args.json else _render_stats(payload))
         return 0
     finally:
@@ -109,6 +149,18 @@ def sources_cmd(args: argparse.Namespace) -> int:
     rows = source_statuses(check_meet=args.check_meet)
     payload = {"sources": rows}
     print(json.dumps(payload, separators=(",", ":")) if args.json else _render_sources(rows))
+    return 0
+
+
+def schema_cmd(args: argparse.Namespace) -> int:
+    model = EnrichedTranscript if args.name == "transcript" else ConnectorAssetSchema
+    payload = model.model_json_schema()
+    body = json.dumps(payload, indent=2)
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(body + "\n")
+    else:
+        print(body)
     return 0
 
 
@@ -130,6 +182,26 @@ def doctor_cmd(args: argparse.Namespace) -> int:
         except Exception:
             pass
     checks.append({"name": "db_writable", "ok": writable, "path": str(config.db_path)})
+    if writable:
+        store = TranscriptStore(config.db_path)
+        try:
+            fingerprint_models = store.fingerprint_model_counts(
+                effective_fingerprint_embedding_model(config)
+            )
+        finally:
+            store.close()
+        checks.append(
+            {
+                "name": "fingerprint_models",
+                "ok": fingerprint_models["legacy"] == 0
+                and fingerprint_models["incompatible"] == 0,
+                **fingerprint_models,
+                "fix": "Run `undertone fingerprint-adopt-model --dry-run` then `--yes` for legacy rows."
+                if fingerprint_models["legacy"] or fingerprint_models["incompatible"]
+                else None,
+            }
+        )
+        ok = ok and fingerprint_models["legacy"] == 0 and fingerprint_models["incompatible"] == 0
     try:
         engine = create_engine(config.default_engine, config)
         engine_ok = asyncio.run(engine.healthcheck())
@@ -213,6 +285,9 @@ def _render_models(payload: dict) -> str:
         f"  pyannote model:      {payload['pyannote_model']}",
         f"  pyannote device:     {payload['pyannote_device']}",
         f"  fingerprints:        {payload['fingerprint_backend']}",
+        f"  fingerprint models:  compatible={payload['fingerprint_models']['compatible']} "
+        f"legacy={payload['fingerprint_models']['legacy']} "
+        f"incompatible={payload['fingerprint_models']['incompatible']}",
         f"  voice metrics:       {payload['voice_metrics']}",
         f"  process timeout:     {payload['process_timeout_seconds']}s",
         f"  default output:      {payload['output_format']} ({payload['output_detail']})",
@@ -237,6 +312,9 @@ def _render_stats(payload: dict) -> str:
             f"  speakers:      {payload['speaker_count']}",
             f"  segments:      {payload['segment_count']}",
             f"  fingerprints:  {payload['fingerprint_count']}",
+            f"    compatible:  {payload['fingerprint_models']['compatible']}",
+            f"    legacy:      {payload['fingerprint_models']['legacy']}",
+            f"    incompatible:{payload['fingerprint_models']['incompatible']}",
         ]
     )
 
@@ -282,3 +360,66 @@ def _check_detail(check: dict) -> str:
         if value:
             parts.append(f"{key}={value}")
     return f" ({', '.join(parts)})" if parts else ""
+
+
+def install_skills_cmd(args: argparse.Namespace) -> int:
+    source = _bundled_skill_dir()
+    targets = args.target or ["claude-user"]
+    installs = []
+    for target in dict.fromkeys(targets):
+        base = _skill_target_dir(target)
+        dest = base / "undertone"
+        if dest.exists() and not args.force:
+            installs.append(
+                {"target": target, "path": str(dest), "status": "exists",
+                 "hint": "pass --force to overwrite"}
+            )
+            continue
+        base.mkdir(parents=True, exist_ok=True)
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(source, dest)
+        installs.append({"target": target, "path": str(dest), "status": "installed"})
+    payload = {"version": _undertone_version(), "source": str(source), "installs": installs}
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"undertone skill v{payload['version']} (from {source})")
+        for item in installs:
+            line = f"  {item['target']:16} {item['status']}: {item['path']}"
+            if item.get("hint"):
+                line += f" ({item['hint']})"
+            print(line)
+    return 0
+
+
+def _bundled_skill_dir() -> Path:
+    package = Path(__file__).resolve().parent.parent
+    bundled = package / "_skills" / "undertone"
+    if bundled.is_dir():
+        return bundled
+    source_tree = package.parent.parent / "skills" / "undertone"
+    if source_tree.is_dir():
+        return source_tree
+    raise FileNotFoundError(
+        "bundled undertone skill not found; reinstall undertone-audio or run from the source tree"
+    )
+
+
+def _skill_target_dir(target: str) -> Path:
+    if target == "claude-user":
+        return Path.home() / ".claude" / "skills"
+    if target == "claude-project":
+        return Path.cwd() / ".claude" / "skills"
+    if target == "codex":
+        return Path.home() / ".codex" / "skills"
+    raise ValueError(f"unknown skill target: {target}")
+
+
+def _undertone_version() -> str:
+    try:
+        from importlib.metadata import version
+
+        return version("undertone-audio")
+    except Exception:
+        return "unknown"

@@ -74,6 +74,8 @@ class Segment(BaseModel):
     start_ms: int
     end_ms: int
     text: str
+    asr_confidence: float | None = None
+    diarization_quality: float | None = None
     words: list[Word] = Field(default_factory=list)
     enrichment: SegmentEnrichment = Field(default_factory=SegmentEnrichment)
 
@@ -141,3 +143,14 @@ class EnrichedTranscript(BaseModel):
     segments: list[Segment]
     speaker_metrics: list[SpeakerVoiceMetrics] = Field(default_factory=list)
     schema_version: Literal["1"] = "1"
+
+
+class ConnectorAssetSchema(BaseModel):
+    schema_version: Literal["1"] = "1"
+    audio_path: str
+    source_url: str
+    source_kind: str
+    title: str | None = None
+    transcript_id_hint: str | None = None
+    recorded_at: str | None = None
+    metadata: dict = Field(default_factory=dict)

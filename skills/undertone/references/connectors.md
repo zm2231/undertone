@@ -1,8 +1,3 @@
----
-name: undertone-connectors
-description: Use when installing or operating Undertone sidecar connectors for YouTube, podcasts, RSS feeds, direct media URLs, or other external media sources that should download audio and rerun local Undertone diarization.
----
-
 # Undertone Connectors
 
 Use this skill for sidecar source connectors. Connectors acquire audio and then hand that audio to the normal Undertone pipeline.
@@ -15,12 +10,30 @@ pip install -e '.[connectors,voice]'
 
 `yt-dlp` is required for YouTube. Podcasts use Python standard-library RSS and download support. FluidAudio is still required for local ASR/diarization.
 
+## Plugin Contract
+
+Connectors can be installed as Python entry-point plugins under `undertone.connectors`. A connector implements:
+
+- `matches(ref) -> bool`
+- `fetch(ref) -> ConnectorAsset`
+
+`ConnectorAsset` is a versioned contract. Inspect it with:
+
+```bash
+undertone schema connector-asset
+undertone connector-list
+undertone --db ./undertone.db connector-ingest 'https://example.com/audio.mp3'
+```
+
+Keep source-specific credentials and cursors outside Undertone unless the connector explicitly owns them. Undertone should receive a ref and return audio plus source metadata.
+Third-party connectors are additive. Built-in YouTube and podcast connectors stay available, and connector name collisions fail loudly instead of shadowing a built-in.
+
 ## Paths
 
 Do not hardcode local machine paths. Use one of:
 
-- `--download-dir /path/to/cache`
-- `UNDERTONE_DOWNLOAD_DIR=/path/to/cache`
+- `UNDERTONE_DOWNLOAD_DIR=/path/to/cache` for built-in connector defaults.
+- `--download-dir /path/to/cache` on first-party source commands that expose it, such as `youtube-ingest` and `podcast-ingest`.
 - default cache path from `XDG_CACHE_HOME/undertone/downloads` or `~/.cache/undertone/downloads`
 
 Downloads publish atomically. A failed YouTube or podcast transfer should not leave a reusable media file in the cache. External downloader/process calls use `UNDERTONE_PROCESS_TIMEOUT_SECONDS`; set it only when long media needs a different bound.
@@ -30,7 +43,8 @@ Downloads publish atomically. A failed YouTube or podcast transfer should not le
 ```bash
 undertone --db ./undertone.db youtube-ingest 'https://www.youtube.com/watch?v=...' \
   --engine fluidaudio-hybrid \
-  --voice-metrics optional
+  --voice-metrics optional \
+  --progress json
 ```
 
 Useful flags:

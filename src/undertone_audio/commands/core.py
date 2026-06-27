@@ -15,9 +15,11 @@ from undertone_audio.commands.common import (
     add_duplicate_flags,
     config_for_args,
     db_path,
+    emit_progress,
     emit_transcript,
     guard_existing_transcript,
     output_format,
+    progress_warning_sink,
 )
 from undertone_audio.engines import create_engine
 from undertone_audio.engines.base import RawTranscript
@@ -40,7 +42,14 @@ def register(subcommands: argparse._SubParsersAction) -> None:
     finalize.add_argument("--diarization-state")
     finalize.add_argument("--diarization-error-code")
     finalize.add_argument("--diarization-error-detail")
+    finalize.add_argument("--embedding-model")
     _add_output_flags(finalize)
+    finalize.add_argument(
+        "--progress",
+        choices=["off", "json"],
+        default="off",
+        help="Emit progress JSONL on stderr.",
+    )
     add_duplicate_flags(finalize)
     finalize.set_defaults(func=finalize_json_cmd)
 
@@ -85,12 +94,19 @@ def register(subcommands: argparse._SubParsersAction) -> None:
 
 
 def finalize_json_cmd(args: argparse.Namespace) -> int:
-    raw = RawTranscript.model_validate(_read_json(args.json_path))
     store = _store(args)
     try:
         if guard_existing_transcript(store, args.transcript_id, args):
+            emit_progress(args, "skipped", transcript_id=args.transcript_id, reason="exists")
             return 0
-        pipeline = AudioPipeline(store=store, config=config_for_args(args))
+        emit_progress(args, "start", command="finalize-json", transcript_id=args.transcript_id)
+        raw = RawTranscript.model_validate(_read_json(args.json_path))
+        emit_progress(args, "finalizing", transcript_id=args.transcript_id)
+        pipeline = AudioPipeline(
+            store=store,
+            config=config_for_args(args),
+            warning_sink=progress_warning_sink(args),
+        )
         transcript = pipeline.finalize_raw(
             raw,
             transcript_id=args.transcript_id,
@@ -105,6 +121,7 @@ def finalize_json_cmd(args: argparse.Namespace) -> int:
             diarization_error_code=args.diarization_error_code,
             diarization_error_detail=args.diarization_error_detail,
         )
+        emit_progress(args, "saved", transcript_id=transcript.transcript_id)
         emit_transcript(transcript, args, raw=raw)
         return 0
     finally:
@@ -112,16 +129,39 @@ def finalize_json_cmd(args: argparse.Namespace) -> int:
 
 
 def run_wav_cmd(args: argparse.Namespace) -> int:
-    if not args.audio_path.exists():
-        raise ValueError(f"audio file not found: {args.audio_path}")
     config = config_for_args(args)
     store = TranscriptStore(config.db_path)
     try:
         if guard_existing_transcript(store, args.transcript_id, args):
+            emit_progress(args, "skipped", transcript_id=args.transcript_id, reason="exists")
             return 0
+        if not args.audio_path.exists():
+            raise ValueError(f"audio file not found: {args.audio_path}")
         engine = create_engine(args.engine, config)
-        pipeline = AudioPipeline(store=store, engine=engine, config=config)
+        emit_progress(
+            args,
+            "start",
+            command="run-wav",
+            transcript_id=args.transcript_id,
+            engine=getattr(engine, "name", config.default_engine),
+            audio_path=str(args.audio_path),
+        )
+        pipeline = AudioPipeline(
+            store=store,
+            engine=engine,
+            config=config,
+            warning_sink=progress_warning_sink(args),
+        )
         raw = asyncio.run(engine.transcribe(args.audio_path))
+        emit_progress(
+            args,
+            "transcribed",
+            transcript_id=args.transcript_id,
+            duration_ms=raw.duration_ms,
+            segments=len(raw.segments),
+            speakers=len(raw.speakers),
+        )
+        emit_progress(args, "finalizing", transcript_id=args.transcript_id)
         transcript = pipeline.finalize_raw(
             raw,
             transcript_id=args.transcript_id,
@@ -133,6 +173,7 @@ def run_wav_cmd(args: argparse.Namespace) -> int:
             audio_format=_audio_format_for_cli(args.audio_path),
             audio_path=args.audio_path,
         )
+        emit_progress(args, "saved", transcript_id=transcript.transcript_id)
         emit_transcript(transcript, args, raw=raw)
         return 0
     finally:
@@ -175,12 +216,16 @@ def reenrich_cmd(args: argparse.Namespace) -> int:
         transcript = store.load(args.transcript_id)
         raw = store.load_raw(args.transcript_id)
         if transcript is None:
-            print(f"undertone: transcript not found: {args.transcript_id}", file=sys.stderr)
-            return 1
+            raise ValueError(f"transcript not found: {args.transcript_id}")
         if raw is None:
-            print(f"undertone: raw transcript not found for: {args.transcript_id}", file=sys.stderr)
-            return 1
-        pipeline = AudioPipeline(store=store, config=config_for_args(args))
+            raise ValueError(f"raw transcript not found for: {args.transcript_id}")
+        emit_progress(args, "start", command="reenrich", transcript_id=args.transcript_id)
+        emit_progress(args, "finalizing", transcript_id=args.transcript_id)
+        pipeline = AudioPipeline(
+            store=store,
+            config=config_for_args(args),
+            warning_sink=progress_warning_sink(args),
+        )
         refreshed = pipeline.finalize_raw(
             raw,
             transcript_id=args.transcript_id,
@@ -196,6 +241,7 @@ def reenrich_cmd(args: argparse.Namespace) -> int:
             diarization_error_detail=transcript.metadata.diarization_error_detail,
             audio_format=transcript.metadata.audio_format,
         )
+        emit_progress(args, "saved", transcript_id=refreshed.transcript_id)
         emit_transcript(refreshed, args, raw=raw)
         return 0
     finally:

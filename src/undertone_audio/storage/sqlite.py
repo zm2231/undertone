@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -17,19 +18,28 @@ from undertone_audio.schema import (
     Word,
 )
 from undertone_audio.privacy import sanitize_source_metadata
-from undertone_audio.diarization.fingerprint import FingerprintAssignmentPlan, SpeakerFingerprintStore
+from undertone_audio.diarization.fingerprint import (
+    FingerprintAssignmentPlan,
+    SpeakerFingerprintStore,
+    _blob_to_vec,
+    _vec_to_blob,
+)
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
 
 class TranscriptStore:
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path, *, migrate: bool = True, read_only: bool = False):
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.db_path)
+        if read_only:
+            self._conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        else:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._conn = sqlite3.connect(self.db_path)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
-        self._migrate()
+        if migrate:
+            self._migrate()
 
     def _migrate(self) -> None:
         self._conn.execute(
@@ -56,7 +66,9 @@ class TranscriptStore:
                 self._conn.rollback()
                 raise
         self._ensure_transcript_columns()
+        self._ensure_segment_columns()
         self._ensure_core_tables()
+        self._ensure_fingerprint_columns()
 
     def _ensure_transcript_columns(self) -> None:
         existing = {row[1] for row in self._conn.execute("PRAGMA table_info(transcripts)")}
@@ -75,6 +87,17 @@ class TranscriptStore:
                 self._conn.execute(f"ALTER TABLE transcripts ADD COLUMN {name} {definition}")
         self._conn.commit()
 
+    def _ensure_segment_columns(self) -> None:
+        existing = {row[1] for row in self._conn.execute("PRAGMA table_info(segments)")}
+        columns = {
+            "asr_confidence": "REAL",
+            "diarization_quality": "REAL",
+        }
+        for name, definition in columns.items():
+            if name not in existing:
+                self._conn.execute(f"ALTER TABLE segments ADD COLUMN {name} {definition}")
+        self._conn.commit()
+
     def _ensure_core_tables(self) -> None:
         self._conn.executescript(
             """
@@ -83,8 +106,18 @@ class TranscriptStore:
                 embedding BLOB NOT NULL,
                 display_name TEXT,
                 sample_count INTEGER NOT NULL DEFAULT 1,
+                embedding_model TEXT,
+                embedding_dimension INTEGER,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS fingerprint_sources (
+                fingerprint_id TEXT NOT NULL REFERENCES speaker_fingerprints(fingerprint_id) ON DELETE CASCADE,
+                transcript_id TEXT NOT NULL REFERENCES transcripts(transcript_id) ON DELETE CASCADE,
+                speaker_id TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (fingerprint_id, transcript_id, speaker_id)
             );
 
             CREATE VIRTUAL TABLE IF NOT EXISTS segments_fts USING fts5(
@@ -95,6 +128,8 @@ class TranscriptStore:
             );
 
             CREATE INDEX IF NOT EXISTS idx_speakers_fingerprint ON speakers(fingerprint_id);
+            CREATE INDEX IF NOT EXISTS idx_fingerprint_sources_transcript
+                ON fingerprint_sources(transcript_id, speaker_id);
             CREATE INDEX IF NOT EXISTS idx_segments_transcript ON segments(transcript_id);
             CREATE INDEX IF NOT EXISTS idx_segments_speaker ON segments(transcript_id, speaker_id);
             CREATE INDEX IF NOT EXISTS idx_segments_transcript_start
@@ -102,6 +137,25 @@ class TranscriptStore:
             """
         )
         self._conn.commit()
+
+    def _ensure_fingerprint_columns(self) -> None:
+        existing = {row[1] for row in self._conn.execute("PRAGMA table_info(speaker_fingerprints)")}
+        columns = {
+            "embedding_model": "TEXT",
+            "embedding_dimension": "INTEGER",
+        }
+        for name, definition in columns.items():
+            if name not in existing:
+                self._conn.execute(f"ALTER TABLE speaker_fingerprints ADD COLUMN {name} {definition}")
+        self._conn.execute(
+            """UPDATE speaker_fingerprints
+               SET embedding_dimension = length(embedding) / 4
+               WHERE embedding_dimension IS NULL"""
+        )
+        self._conn.commit()
+
+    def _table_columns(self, table: str) -> set[str]:
+        return {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
 
     def save(self, transcript: EnrichedTranscript) -> None:
         self.save_with_fingerprint_plan(transcript, None)
@@ -167,7 +221,7 @@ class TranscriptStore:
                  fingerprint_backend = excluded.fingerprint_backend,
                  model_versions = excluded.model_versions,
                  audio_format = excluded.audio_format,
-                 raw_transcript_json = excluded.raw_transcript_json,
+                 raw_transcript_json = COALESCE(excluded.raw_transcript_json, transcripts.raw_transcript_json),
                  pipeline_version = excluded.pipeline_version,
                  schema_version = excluded.schema_version,
                  expected_speaker_count = excluded.expected_speaker_count,
@@ -217,6 +271,7 @@ class TranscriptStore:
                 f"segments referencing unknown speakers {sample}"
             )
 
+        c.execute("DELETE FROM fingerprint_sources WHERE transcript_id = ?", (transcript.transcript_id,))
         c.execute("DELETE FROM speakers WHERE transcript_id = ?", (transcript.transcript_id,))
         c.executemany(
             """INSERT INTO speakers
@@ -238,9 +293,10 @@ class TranscriptStore:
         c.executemany(
             """INSERT INTO segments
                (segment_id, transcript_id, speaker_id, start_ms, end_ms, text,
+                asr_confidence, diarization_quality,
                 sentiment, sentiment_confidence, tone_tags, is_interruption,
                 overlap_with_prev_ms, gap_before_ms, fillers, linguistic, words)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [self._segment_row(transcript.transcript_id, segment) for segment in transcript.segments],
         )
 
@@ -295,6 +351,8 @@ class TranscriptStore:
             segment.start_ms,
             segment.end_ms,
             segment.text,
+            segment.asr_confidence,
+            segment.diarization_quality,
             enrichment.sentiment.value if enrichment.sentiment else None,
             enrichment.sentiment_confidence,
             json.dumps(enrichment.tone_tags),
@@ -377,6 +435,354 @@ class TranscriptStore:
             speaker_metrics=metrics,
         )
 
+    def relabel_speakers(self, transcript_id: str | None = None) -> dict:
+        where = ""
+        params: list[object] = []
+        if transcript_id:
+            where = "WHERE s.transcript_id = ?"
+            params.append(transcript_id)
+        sql = f"""SELECT s.transcript_id, s.speaker_id, s.fingerprint_id,
+                         s.display_name AS old_name, f.display_name AS new_name
+                  FROM speakers s
+                  LEFT JOIN speaker_fingerprints f
+                    ON f.fingerprint_id = s.fingerprint_id
+                  {where}"""
+        rows = [dict(row) for row in self._conn.execute(sql, params)]
+        if transcript_id and not rows and not self.exists(transcript_id):
+            raise ValueError(f"transcript not found: {transcript_id}")
+
+        updates = [
+            row
+            for row in rows
+            if row["fingerprint_id"]
+            and row["new_name"] is not None
+            and (row["old_name"] or None) != row["new_name"]
+        ]
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            for row in updates:
+                self._conn.execute(
+                    """UPDATE speakers
+                       SET display_name = ?
+                       WHERE transcript_id = ? AND speaker_id = ?""",
+                    (row["new_name"], row["transcript_id"], row["speaker_id"]),
+                )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+
+        return {
+            "transcript_id": transcript_id,
+            "speakers_seen": len(rows),
+            "speakers_updated": len(updates),
+            "updates": updates,
+        }
+
+    def export_fingerprints(self) -> list[dict]:
+        rows = []
+        for row in self._conn.execute(
+            """SELECT fingerprint_id, embedding, display_name, sample_count,
+                      embedding_model, embedding_dimension, created_at, updated_at
+               FROM speaker_fingerprints ORDER BY fingerprint_id"""
+        ):
+            rows.append(
+                {
+                    "fingerprint_id": row["fingerprint_id"],
+                    "embedding": _blob_to_vec(row["embedding"]),
+                    "display_name": row["display_name"],
+                    "sample_count": row["sample_count"],
+                    "embedding_model": row["embedding_model"],
+                    "embedding_dimension": row["embedding_dimension"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                }
+            )
+        return rows
+
+    def fingerprint_import_plan(self, fingerprints: list[dict], *, replace: bool) -> dict:
+        rows = _normalize_fingerprint_rows(fingerprints)
+        return self._fingerprint_import_plan_on_conn(rows, replace=replace)
+
+    def import_fingerprints(self, fingerprints: list[dict], *, replace: bool) -> dict:
+        rows = _normalize_fingerprint_rows(fingerprints)
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            plan = self._fingerprint_import_plan_on_conn(rows, replace=replace)
+            self._apply_fingerprint_import_plan(plan)
+            self._conn.commit()
+            plan["dry_run"] = False
+            return plan
+        except Exception:
+            self._conn.rollback()
+            raise
+
+    def _fingerprint_import_plan_on_conn(self, fingerprints: list[dict], *, replace: bool) -> dict:
+        plan = {
+            "operation": "fingerprint-import",
+            "dry_run": True,
+            "replace": replace,
+            "to_insert": [],
+            "to_replace": [],
+            "skipped_existing": [],
+        }
+        existing = {
+            row["fingerprint_id"]
+            for row in self._conn.execute("SELECT fingerprint_id FROM speaker_fingerprints")
+        }
+        for row in fingerprints:
+            fingerprint_id = row["fingerprint_id"]
+            if fingerprint_id in existing and replace:
+                plan["to_replace"].append(row)
+            elif fingerprint_id in existing:
+                plan["skipped_existing"].append(fingerprint_id)
+            else:
+                plan["to_insert"].append(row)
+                existing.add(fingerprint_id)
+        return plan
+
+    def _apply_fingerprint_import_plan(self, plan: dict) -> None:
+        for row in plan["to_replace"]:
+            self._conn.execute(
+                """UPDATE speaker_fingerprints
+                   SET embedding = ?, display_name = ?, sample_count = ?,
+                       embedding_model = ?, embedding_dimension = ?,
+                       created_at = COALESCE(?, created_at),
+                       updated_at = COALESCE(?, CURRENT_TIMESTAMP)
+                   WHERE fingerprint_id = ?""",
+                (
+                    _vec_to_blob(row["embedding"]),
+                    row.get("display_name"),
+                    row.get("sample_count", 1),
+                    row.get("embedding_model"),
+                    row.get("embedding_dimension"),
+                    row.get("created_at"),
+                    row.get("updated_at"),
+                    row["fingerprint_id"],
+                ),
+            )
+            self._relabel_speakers_for_fingerprint(row["fingerprint_id"], row.get("display_name"))
+        for row in plan["to_insert"]:
+            self._conn.execute(
+                """INSERT INTO speaker_fingerprints
+                   (fingerprint_id, embedding, display_name, sample_count,
+                    embedding_model, embedding_dimension, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))""",
+                (
+                    row["fingerprint_id"],
+                    _vec_to_blob(row["embedding"]),
+                    row.get("display_name"),
+                    row.get("sample_count", 1),
+                    row.get("embedding_model"),
+                    row.get("embedding_dimension"),
+                    row.get("created_at"),
+                    row.get("updated_at"),
+                ),
+            )
+            self._relabel_speakers_for_fingerprint(row["fingerprint_id"], row.get("display_name"))
+
+    def _relabel_speakers_for_fingerprint(self, fingerprint_id: str, display_name: str | None) -> None:
+        self._conn.execute(
+            "UPDATE speakers SET display_name = ? WHERE fingerprint_id = ?",
+            (display_name, fingerprint_id),
+        )
+
+    def fingerprint_merge_plan(self, source: str, target: str) -> dict:
+        plan = self._fingerprint_merge_plan_on_conn(source, target)
+        plan.pop("merged_embedding", None)
+        return plan
+
+    def merge_fingerprints(self, source: str, target: str) -> dict:
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            plan = self._fingerprint_merge_plan_on_conn(source, target)
+            self._apply_fingerprint_merge_plan(plan)
+            self._conn.commit()
+            plan["dry_run"] = False
+            plan.pop("merged_embedding", None)
+            return plan
+        except Exception:
+            self._conn.rollback()
+            raise
+
+    def _fingerprint_merge_plan_on_conn(self, source: str, target: str) -> dict:
+        source_row = self._conn.execute(
+            "SELECT * FROM speaker_fingerprints WHERE fingerprint_id = ?",
+            (source,),
+        ).fetchone()
+        target_row = self._conn.execute(
+            "SELECT * FROM speaker_fingerprints WHERE fingerprint_id = ?",
+            (target,),
+        ).fetchone()
+        if source_row is None:
+            raise ValueError(f"source fingerprint not found: {source}")
+        if target_row is None:
+            raise ValueError(f"target fingerprint not found: {target}")
+        source_vec = _blob_to_vec(source_row["embedding"])
+        target_vec = _blob_to_vec(target_row["embedding"])
+        if source_row["embedding_model"] != target_row["embedding_model"]:
+            raise ValueError("cannot merge fingerprints with different embedding models")
+        if len(source_vec) != len(target_vec):
+            raise ValueError("cannot merge fingerprints with different embedding dimensions")
+        speaker_rows = self._conn.execute(
+            "SELECT COUNT(*) AS count FROM speakers WHERE fingerprint_id = ?",
+            (source,),
+        ).fetchone()["count"]
+        return {
+            "operation": "fingerprint-merge",
+            "dry_run": True,
+            "source_fingerprint_id": source,
+            "target_fingerprint_id": target,
+            "source_display_name": source_row["display_name"],
+            "target_display_name": target_row["display_name"] or source_row["display_name"],
+            "source_sample_count": source_row["sample_count"],
+            "target_sample_count": target_row["sample_count"],
+            "embedding_model": target_row["embedding_model"],
+            "embedding_dimension": target_row["embedding_dimension"],
+            "speaker_rows_to_repoint": speaker_rows,
+            "excerpts": self._fingerprint_excerpts(source),
+            "merged_embedding": [
+                (target_value * target_row["sample_count"] + source_value * source_row["sample_count"])
+                / (target_row["sample_count"] + source_row["sample_count"])
+                for target_value, source_value in zip(target_vec, source_vec)
+            ],
+        }
+
+    def _apply_fingerprint_merge_plan(self, plan: dict) -> None:
+        source = plan["source_fingerprint_id"]
+        target = plan["target_fingerprint_id"]
+        self._conn.execute(
+            "UPDATE speakers SET fingerprint_id = ?, display_name = ? WHERE fingerprint_id = ?",
+            (target, plan["target_display_name"], source),
+        )
+        self._conn.execute(
+            "UPDATE speakers SET display_name = ? WHERE fingerprint_id = ?",
+            (plan["target_display_name"], target),
+        )
+        self._conn.execute(
+            """UPDATE speaker_fingerprints
+               SET embedding = ?, display_name = ?, sample_count = ?,
+                   embedding_model = ?, embedding_dimension = ?, updated_at = CURRENT_TIMESTAMP
+               WHERE fingerprint_id = ?""",
+            (
+                _vec_to_blob(plan["merged_embedding"]),
+                plan["target_display_name"],
+                plan["source_sample_count"] + plan["target_sample_count"],
+                plan["embedding_model"],
+                plan["embedding_dimension"],
+                target,
+            ),
+        )
+        self._conn.execute(
+            """INSERT OR IGNORE INTO fingerprint_sources
+               (fingerprint_id, transcript_id, speaker_id, created_at)
+               SELECT ?, transcript_id, speaker_id, created_at
+               FROM fingerprint_sources
+               WHERE fingerprint_id = ?""",
+            (target, source),
+        )
+        self._conn.execute("DELETE FROM fingerprint_sources WHERE fingerprint_id = ?", (source,))
+        self._conn.execute("DELETE FROM speaker_fingerprints WHERE fingerprint_id = ?", (source,))
+
+    def fingerprint_model_counts(self, active_model: str | None) -> dict:
+        columns = self._table_columns("speaker_fingerprints")
+        if "embedding_model" in columns:
+            rows = self._conn.execute(
+                """SELECT embedding_model, COUNT(*) AS count
+                   FROM speaker_fingerprints
+                   GROUP BY embedding_model"""
+            )
+        else:
+            rows = self._conn.execute(
+                """SELECT NULL AS embedding_model, COUNT(*) AS count
+                   FROM speaker_fingerprints"""
+            )
+        legacy = 0
+        compatible = 0
+        incompatible = 0
+        by_model = []
+        for row in rows:
+            model = row["embedding_model"]
+            count = row["count"]
+            by_model.append({"embedding_model": model, "count": count})
+            if model is None:
+                legacy += count
+            elif model == active_model:
+                compatible += count
+            else:
+                incompatible += count
+        return {
+            "active_embedding_model": active_model,
+            "compatible": compatible,
+            "legacy": legacy,
+            "incompatible": incompatible,
+            "by_model": by_model,
+        }
+
+    def fingerprint_adopt_model_plan(
+        self,
+        embedding_model: str,
+        *,
+        only_legacy: bool = True,
+    ) -> dict:
+        columns = self._table_columns("speaker_fingerprints")
+        has_model_column = "embedding_model" in columns
+        where = "embedding_model IS NULL" if only_legacy and has_model_column else "1 = 1"
+        model_projection = "embedding_model" if has_model_column else "NULL AS embedding_model"
+        rows = [
+            dict(row)
+            for row in self._conn.execute(
+                f"""SELECT fingerprint_id, display_name, sample_count,
+                           {model_projection}
+                    FROM speaker_fingerprints
+                    WHERE {where}
+                    ORDER BY fingerprint_id"""
+            )
+        ]
+        return {
+            "operation": "fingerprint-adopt-model",
+            "dry_run": True,
+            "embedding_model": embedding_model,
+            "only_legacy": only_legacy,
+            "fingerprints_seen": len(rows),
+            "fingerprints_to_update": len(rows),
+            "updates": rows,
+        }
+
+    def adopt_fingerprint_model(self, embedding_model: str, *, only_legacy: bool = True) -> dict:
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            plan = self.fingerprint_adopt_model_plan(embedding_model, only_legacy=only_legacy)
+            where = "embedding_model IS NULL" if only_legacy else "1 = 1"
+            self._conn.execute(
+                f"""UPDATE speaker_fingerprints
+                    SET embedding_model = ?,
+                        embedding_dimension = COALESCE(embedding_dimension, length(embedding) / 4),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE {where}""",
+                (embedding_model,),
+            )
+            self._conn.commit()
+            plan["dry_run"] = False
+            return plan
+        except Exception:
+            self._conn.rollback()
+            raise
+
+    def _fingerprint_excerpts(self, fingerprint_id: str) -> list[dict]:
+        rows = self._conn.execute(
+            """SELECT g.transcript_id, g.segment_id, g.speaker_id, g.start_ms, g.end_ms, g.text
+               FROM speakers s
+               JOIN segments g
+                 ON g.transcript_id = s.transcript_id
+                AND g.speaker_id = s.speaker_id
+               WHERE s.fingerprint_id = ?
+               ORDER BY g.transcript_id, g.start_ms
+               LIMIT 3""",
+            (fingerprint_id,),
+        )
+        return [dict(row) for row in rows]
+
     def _store_ref(self, transcript_id: str) -> str:
         return f"sqlite:{self.db_path.expanduser().resolve()}#{transcript_id}"
 
@@ -424,7 +830,7 @@ class TranscriptStore:
         params.extend([limit, offset])
         return [dict(row) for row in self._conn.execute(sql, params)]
 
-    def stats(self) -> dict:
+    def stats(self, *, active_embedding_model: str | None = None) -> dict:
         row = self._conn.execute(
             """SELECT COUNT(*) AS transcript_count,
                       COALESCE(SUM(duration_ms), 0) AS total_duration_ms
@@ -443,6 +849,7 @@ class TranscriptStore:
             "speaker_count": speakers,
             "segment_count": segments,
             "fingerprint_count": fingerprints,
+            "fingerprint_models": self.fingerprint_model_counts(active_embedding_model),
         }
 
     def fingerprint_excerpts(
@@ -516,6 +923,8 @@ class TranscriptStore:
             start_ms=row["start_ms"],
             end_ms=row["end_ms"],
             text=row["text"],
+            asr_confidence=row["asr_confidence"],
+            diarization_quality=row["diarization_quality"],
             words=[Word(**word) for word in json.loads(row["words"] or "[]")],
             enrichment=SegmentEnrichment(
                 sentiment=Sentiment(row["sentiment"]) if row["sentiment"] else None,
@@ -543,3 +952,66 @@ class TranscriptStore:
 
     def close(self) -> None:
         self._conn.close()
+
+
+def _normalize_fingerprint_row(row: dict, index: int) -> dict:
+    if not isinstance(row, dict):
+        raise ValueError(f"fingerprints[{index}] must be an object")
+    fingerprint_id = row.get("fingerprint_id")
+    if not isinstance(fingerprint_id, str) or not fingerprint_id.strip():
+        raise ValueError(f"fingerprints[{index}].fingerprint_id is required")
+    embedding = row.get("embedding")
+    if not isinstance(embedding, list) or not embedding:
+        raise ValueError(f"fingerprints[{index}].embedding must be a non-empty number list")
+    try:
+        cleaned_embedding = [float(value) for value in embedding]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"fingerprints[{index}].embedding must contain only numbers") from exc
+    if not all(math.isfinite(value) for value in cleaned_embedding):
+        raise ValueError(f"fingerprints[{index}].embedding must contain only finite numbers")
+    sample_count = row.get("sample_count", 1)
+    if not isinstance(sample_count, int) or sample_count < 1:
+        raise ValueError(f"fingerprints[{index}].sample_count must be a positive integer")
+    display_name = row.get("display_name")
+    if display_name is not None and not isinstance(display_name, str):
+        raise ValueError(f"fingerprints[{index}].display_name must be a string or null")
+    created_at = _optional_timestamp(row, "created_at", index)
+    updated_at = _optional_timestamp(row, "updated_at", index)
+    embedding_model = row.get("embedding_model")
+    if embedding_model is not None and (not isinstance(embedding_model, str) or not embedding_model.strip()):
+        raise ValueError(f"fingerprints[{index}].embedding_model must be a non-empty string or null")
+    embedding_dimension = row.get("embedding_dimension", len(cleaned_embedding))
+    if not isinstance(embedding_dimension, int) or embedding_dimension != len(cleaned_embedding):
+        raise ValueError(
+            f"fingerprints[{index}].embedding_dimension must equal embedding length"
+        )
+    return {
+        "fingerprint_id": fingerprint_id,
+        "embedding": cleaned_embedding,
+        "display_name": display_name,
+        "sample_count": sample_count,
+        "embedding_model": embedding_model,
+        "embedding_dimension": embedding_dimension,
+        "created_at": created_at,
+        "updated_at": updated_at,
+    }
+
+
+def _optional_timestamp(row: dict, field: str, index: int) -> str | None:
+    value = row.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"fingerprints[{index}].{field} must be a non-empty string or null")
+    return value
+
+
+def _normalize_fingerprint_rows(rows: list[dict]) -> list[dict]:
+    normalized = [_normalize_fingerprint_row(row, index) for index, row in enumerate(rows)]
+    seen: set[str] = set()
+    for index, row in enumerate(normalized):
+        fingerprint_id = row["fingerprint_id"]
+        if fingerprint_id in seen:
+            raise ValueError(f"duplicate fingerprint_id in import file: {fingerprint_id}")
+        seen.add(fingerprint_id)
+    return normalized

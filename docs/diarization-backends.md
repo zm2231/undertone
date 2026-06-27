@@ -14,6 +14,8 @@ Use it when you want the standard on-device FluidAudio path:
 undertone run-wav ./meeting.wav --engine fluidaudio-hybrid
 ```
 
+Sortformer spans do not expose a confidence score. Undertone overlap-maps FluidAudio process `qualityScore` onto final Sortformer spans when possible and stores that nullable approximation as `segments[].diarization_quality`.
+
 ## `fluidaudio-pyannote`
 
 This engine runs FluidAudio ASR for word timings and runs `pyannote.audio` in-process for diarization spans and speaker embeddings. It is useful when Sortformer under-splits speakers and you need pyannote's speaker separation.
@@ -69,6 +71,12 @@ export UNDERTONE_ENGINE=fluidaudio-hybrid
 ```
 
 If the selected pyannote model is gated, accept the model terms on Hugging Face and set `HF_TOKEN` or `HUGGINGFACE_TOKEN`.
+
+Pyannote's public `DiarizeOutput` exposes diarization annotations and speaker embeddings, but not per-span confidence or posterior fields. Undertone therefore keeps `segments[].diarization_quality` as `null` on this backend.
+
+## Confidence Fields
+
+Undertone always preserves FluidAudio word confidence as `words[].confidence` when FluidAudio emits it, and derives `segments[].asr_confidence` from segment words. Diarization quality is backend-specific: direct FluidAudio process `qualityScore` on `fluidaudio-cli`, overlap-mapped process quality on `fluidaudio-hybrid`, and `null` on `fluidaudio-pyannote`.
 
 ## Execution Order
 

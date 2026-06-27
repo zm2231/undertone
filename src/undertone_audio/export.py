@@ -135,6 +135,10 @@ def _raw_payload(raw: RawTranscript, detail: str) -> dict[str, Any]:
             "start_ms": segment.start_ms,
             "end_ms": segment.end_ms,
             "text": segment.text,
+            "asr_confidence": segment.asr_confidence
+            if segment.asr_confidence is not None
+            else _segment_asr_confidence(segment),
+            "diarization_quality": segment.diarization_quality,
         }
         if detail == "full":
             row["words"] = [word.model_dump(mode="json") for word in segment.words]
@@ -150,6 +154,8 @@ def _segment_payload(transcript_id: str, segment, detail: str) -> dict[str, Any]
         "start_ms": segment.start_ms,
         "end_ms": segment.end_ms,
         "text": segment.text,
+        "asr_confidence": segment.asr_confidence,
+        "diarization_quality": segment.diarization_quality,
     }
     if detail == "full":
         payload["words"] = [word.model_dump(mode="json") for word in segment.words]
@@ -161,6 +167,11 @@ def _segment_payload(transcript_id: str, segment, detail: str) -> dict[str, Any]
 
 def _drop_acoustic_metrics(metric: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in metric.items() if key not in ACOUSTIC_METRIC_FIELDS}
+
+
+def _segment_asr_confidence(segment) -> float | None:
+    confidences = [word.confidence for word in segment.words if word.confidence is not None]
+    return sum(confidences) / len(confidences) if confidences else None
 
 
 def _render_text(transcript: EnrichedTranscript, detail: str) -> str:

@@ -39,9 +39,15 @@ def _cosine(a: list[float], b: list[float]) -> float:
 class SpeakerFingerprintStore:
     """Persisted cross-recording voice embedding store."""
 
-    def __init__(self, db_path: Path, similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD):
+    def __init__(
+        self,
+        db_path: Path,
+        similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+        embedding_model: str | None = None,
+    ):
         self.db_path = Path(db_path)
         self.similarity_threshold = similarity_threshold
+        self.embedding_model = embedding_model
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -62,6 +68,20 @@ class SpeakerFingerprintStore:
         gates are skipped for that speaker (margin matching still applies).
         """
         durations = speaker_durations_ms or {}
+        if self.embedding_model is None:
+            query = (
+                "SELECT fingerprint_id, embedding, sample_count, display_name "
+                "FROM speaker_fingerprints "
+                "WHERE embedding_model IS NULL"
+            )
+            params = ()
+        else:
+            query = (
+                "SELECT fingerprint_id, embedding, sample_count, display_name "
+                "FROM speaker_fingerprints "
+                "WHERE embedding_model = ?"
+            )
+            params = (self.embedding_model,)
         with self._conn() as conn:
             stored = [
                 (
@@ -70,10 +90,7 @@ class SpeakerFingerprintStore:
                     row["sample_count"],
                     row["display_name"],
                 )
-                for row in conn.execute(
-                    "SELECT fingerprint_id, embedding, sample_count, display_name "
-                    "FROM speaker_fingerprints"
-                )
+                for row in conn.execute(query, params)
             ]
 
         plan = FingerprintAssignmentPlan(self)
@@ -164,7 +181,15 @@ class SpeakerFingerprintStore:
                 continue
 
             fingerprint_id = self._mint_fingerprint(speaker.embedding)
-            plan.inserts.append((fingerprint_id, list(speaker.embedding), speaker.display_name))
+            plan.inserts.append(
+                (
+                    fingerprint_id,
+                    list(speaker.embedding),
+                    speaker.display_name,
+                    self.embedding_model,
+                    len(speaker.embedding),
+                )
+            )
             updated.append(speaker.model_copy(update={"fingerprint_id": fingerprint_id}))
             stored.append((fingerprint_id, list(speaker.embedding), 1, speaker.display_name))
             log.info(
@@ -193,10 +218,20 @@ class SpeakerFingerprintStore:
         conn: sqlite3.Connection,
         plan: "FingerprintAssignmentPlan",
     ) -> None:
-        for fingerprint_id, embedding, display_name in plan.inserts:
-            self._insert(conn, fingerprint_id, embedding, display_name)
+        for fingerprint_id, embedding, display_name, embedding_model, embedding_dimension in plan.inserts:
+            self._insert(conn, fingerprint_id, embedding, display_name, embedding_model, embedding_dimension)
         for fingerprint_id, embedding in plan.matches:
             self._update_mean(conn, fingerprint_id, embedding)
+        for fingerprint_id, transcript_id, speaker_id in plan.sources:
+            conn.execute(
+                """INSERT OR IGNORE INTO fingerprint_sources
+                   (fingerprint_id, transcript_id, speaker_id)
+                   SELECT ?, ?, ?
+                   WHERE EXISTS (
+                       SELECT 1 FROM speaker_fingerprints WHERE fingerprint_id = ?
+                   )""",
+                (fingerprint_id, transcript_id, speaker_id, fingerprint_id),
+            )
 
     def label(self, fingerprint_id: str, display_name: str) -> None:
         with self._conn() as conn:
@@ -208,18 +243,27 @@ class SpeakerFingerprintStore:
             if cursor.rowcount == 0:
                 raise ValueError(f"fingerprint not found: {fingerprint_id}")
 
-    def list_all(self) -> list[tuple[str, str | None, int]]:
+    def list_all(self) -> list[tuple[str, str | None, int, str | None]]:
         with self._conn() as conn:
             return [
-                (row["fingerprint_id"], row["display_name"], row["sample_count"])
+                (
+                    row["fingerprint_id"],
+                    row["display_name"],
+                    row["sample_count"],
+                    row["embedding_model"],
+                )
                 for row in conn.execute(
-                    "SELECT fingerprint_id, display_name, sample_count "
+                    "SELECT fingerprint_id, display_name, sample_count, embedding_model "
                     "FROM speaker_fingerprints ORDER BY fingerprint_id"
                 )
             ]
 
     def _mint_fingerprint(self, embedding: list[float]) -> str:
-        digest = hashlib.blake2b(_vec_to_blob(embedding), digest_size=8).hexdigest()
+        h = hashlib.blake2b(digest_size=8)
+        h.update(_vec_to_blob(embedding))
+        h.update(b"\0")
+        h.update((self.embedding_model or "").encode("utf-8"))
+        digest = h.hexdigest()
         return f"VP-{digest}"
 
     def _insert(
@@ -228,12 +272,14 @@ class SpeakerFingerprintStore:
         fingerprint_id: str,
         embedding: list[float],
         display_name: str | None,
+        embedding_model: str | None,
+        embedding_dimension: int,
     ) -> None:
         conn.execute(
             """INSERT INTO speaker_fingerprints
-               (fingerprint_id, embedding, display_name, sample_count)
-               VALUES (?, ?, ?, 1)""",
-            (fingerprint_id, _vec_to_blob(embedding), display_name),
+               (fingerprint_id, embedding, display_name, sample_count, embedding_model, embedding_dimension)
+               VALUES (?, ?, ?, 1, ?, ?)""",
+            (fingerprint_id, _vec_to_blob(embedding), display_name, embedding_model, embedding_dimension),
         )
 
     def _update_mean(
@@ -242,26 +288,44 @@ class SpeakerFingerprintStore:
         fingerprint_id: str,
         new_embedding: list[float],
     ) -> None:
-        row = conn.execute(
-            "SELECT embedding, sample_count FROM speaker_fingerprints WHERE fingerprint_id = ?",
-            (fingerprint_id,),
-        ).fetchone()
+        if self.embedding_model is None:
+            row = conn.execute(
+                """SELECT embedding, sample_count, embedding_model, embedding_dimension
+                   FROM speaker_fingerprints
+                   WHERE fingerprint_id = ? AND embedding_model IS NULL""",
+                (fingerprint_id,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """SELECT embedding, sample_count, embedding_model, embedding_dimension
+                   FROM speaker_fingerprints
+                   WHERE fingerprint_id = ? AND embedding_model = ?""",
+                (fingerprint_id, self.embedding_model),
+            ).fetchone()
         if not row:
             return
         old = _blob_to_vec(row["embedding"])
         count = row["sample_count"]
-        if len(old) != len(new_embedding):
+        if len(old) != len(new_embedding) or row["embedding_dimension"] != len(new_embedding):
             return
         merged = [
             (old_value * count + new_value) / (count + 1)
             for old_value, new_value in zip(old, new_embedding)
         ]
-        conn.execute(
-            """UPDATE speaker_fingerprints
-               SET embedding = ?, sample_count = sample_count + 1, updated_at = CURRENT_TIMESTAMP
-               WHERE fingerprint_id = ?""",
-            (_vec_to_blob(merged), fingerprint_id),
-        )
+        if self.embedding_model is None:
+            conn.execute(
+                """UPDATE speaker_fingerprints
+                   SET embedding = ?, sample_count = sample_count + 1, updated_at = CURRENT_TIMESTAMP
+                   WHERE fingerprint_id = ? AND embedding_model IS NULL""",
+                (_vec_to_blob(merged), fingerprint_id),
+            )
+        else:
+            conn.execute(
+                """UPDATE speaker_fingerprints
+                   SET embedding = ?, sample_count = sample_count + 1, updated_at = CURRENT_TIMESTAMP
+                   WHERE fingerprint_id = ? AND embedding_model = ?""",
+                (_vec_to_blob(merged), fingerprint_id, self.embedding_model),
+            )
 
 
 class FingerprintAssignmentPlan:
@@ -269,8 +333,9 @@ class FingerprintAssignmentPlan:
 
     def __init__(self, store: SpeakerFingerprintStore):
         self._store = store
-        self.inserts: list[tuple[str, list[float], str | None]] = []
+        self.inserts: list[tuple[str, list[float], str | None, str | None, int]] = []
         self.matches: list[tuple[str, list[float]]] = []
+        self.sources: list[tuple[str, str, str]] = []
 
     def commit(self) -> None:
         if self.inserts or self.matches:

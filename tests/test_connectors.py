@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from undertone_audio.cli import main
+from undertone_audio.connectors.base import connector_for_ref, discover_connectors
 from undertone_audio.connectors.podcast import PodcastConnector
 from undertone_audio.connectors.youtube import YouTubeConnector
 from undertone_audio.engines.base import RawTranscript
@@ -37,6 +38,18 @@ def test_youtube_connector_uses_yt_dlp_args_without_shell(monkeypatch, tmp_path)
     assert asset.metadata["audio_priority"] == "downloaded-youtube-audio"
     assert commands[0][0] == "yt-dlp"
     assert "https://youtu.be/abc123" in commands[0]
+
+
+def test_youtube_connector_matches_only_real_youtube_hosts():
+    connector = YouTubeConnector()
+
+    assert connector.matches("https://youtube.com/watch?v=abc")
+    assert connector.matches("https://www.youtube.com:443/watch?v=abc")
+    assert connector.matches("https://music.youtube.com/watch?v=abc")
+    assert connector.matches("https://youtu.be/abc")
+    assert not connector.matches("https://notyoutube.com/watch?v=abc")
+    assert not connector.matches("https://youtube.com.example/watch?v=abc")
+    assert not connector.matches("https://notyoutu.be/abc")
 
 
 def test_youtube_connector_does_not_publish_failed_download(monkeypatch, tmp_path):
@@ -221,6 +234,616 @@ def test_youtube_ingest_cli_reruns_local_audio_pipeline(tmp_path, monkeypatch, c
     assert payload["transcript_id"] == "youtube-abc"
     assert payload["metadata"]["source_url"] == "https://youtu.be/abc"
     assert payload["metadata"]["source_metadata"]["audio_priority"] == "downloaded-youtube-audio"
+
+
+def test_connector_list_and_generic_ingest_use_discovered_connector(tmp_path, monkeypatch, capsys):
+    class FakeConnector:
+        name = "fixture"
+        source_kind = "fixture-audio"
+
+        def matches(self, ref):
+            return ref.startswith("fixture:")
+
+        def fetch(self, ref):
+            from undertone_audio.connectors import ConnectorAsset
+
+            path = tmp_path / "fixture.wav"
+            path.write_bytes(b"audio")
+            return ConnectorAsset(
+                audio_path=path,
+                source_url=ref,
+                source_kind="fixture-audio",
+                transcript_id_hint="fixture-1",
+                metadata={"source": "fixture"},
+            )
+
+    class FakeEngine:
+        async def transcribe(self, audio_path: Path):
+            return RawTranscript(
+                duration_ms=1000,
+                language="en",
+                engine="fixture-engine",
+                speakers=[Speaker(speaker_id="S1")],
+                segments=[
+                    Segment(
+                        segment_id="s1",
+                        speaker_id="S1",
+                        start_ms=0,
+                        end_ms=1000,
+                        text="generic connector",
+                    )
+                ],
+            )
+
+    monkeypatch.setattr(
+        "undertone_audio.commands.connectors.discover_connectors",
+        lambda: [FakeConnector()],
+    )
+    monkeypatch.setattr(
+        "undertone_audio.commands.connectors.connector_for_ref",
+        lambda ref, preferred=None: FakeConnector(),
+    )
+    monkeypatch.setattr("undertone_audio.commands.connectors.create_engine", lambda name, config: FakeEngine())
+    monkeypatch.setenv("UNDERTONE_WEBHOOK_ENABLED", "0")
+
+    assert main(["connector-list", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == [
+        {"name": "fixture", "source_kind": "fixture-audio"}
+    ]
+
+    assert (
+        main(
+            [
+                "--db",
+                str(tmp_path / "undertone.db"),
+                "connector-ingest",
+                "fixture:one",
+                "--progress",
+                "json",
+            ]
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert [json.loads(line)["event"] for line in captured.err.splitlines()] == [
+        "fetching",
+        "start",
+        "transcribed",
+        "finalizing",
+        "saved",
+    ]
+    payload = json.loads(captured.out)
+    assert payload["transcript_id"] == "fixture-1"
+    assert payload["metadata"]["source_metadata"]["source"] == "fixture"
+
+
+def test_connector_ingest_skip_existing_does_not_fetch_when_transcript_id_known(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    db = tmp_path / "undertone.db"
+    _save_existing_transcript(tmp_path, db, "existing-connector")
+    capsys.readouterr()
+
+    def fail_connector_for_ref(ref, preferred=None):
+        raise AssertionError("connector should not be resolved")
+
+    monkeypatch.setattr(
+        "undertone_audio.commands.connectors.connector_for_ref",
+        fail_connector_for_ref,
+    )
+
+    assert (
+        main(
+            [
+                "--db",
+                str(db),
+                "connector-ingest",
+                "fixture:one",
+                "--transcript-id",
+                "existing-connector",
+                "--skip-existing",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["skipped"] is True
+
+
+def test_connector_ingest_skip_existing_does_not_fetch_for_known_youtube_ref(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    db = tmp_path / "undertone.db"
+    _save_existing_transcript(tmp_path, db, "youtube-abc123")
+    capsys.readouterr()
+
+    def fail_connector_for_ref(ref, preferred=None):
+        raise AssertionError("connector should not be resolved")
+
+    monkeypatch.setattr(
+        "undertone_audio.commands.connectors.connector_for_ref",
+        fail_connector_for_ref,
+    )
+
+    assert (
+        main(
+            [
+                "--db",
+                str(db),
+                "connector-ingest",
+                "https://www.youtube.com/watch?v=abc123",
+                "--skip-existing",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["skipped"] is True
+
+
+def test_connector_ingest_skip_existing_does_not_fetch_for_preferred_youtube_ref(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    db = tmp_path / "undertone.db"
+    _save_existing_transcript(tmp_path, db, "youtube-abc123")
+    capsys.readouterr()
+
+    def fail_connector_for_ref(ref, preferred=None):
+        raise AssertionError("connector should not be resolved")
+
+    monkeypatch.setattr(
+        "undertone_audio.commands.connectors.connector_for_ref",
+        fail_connector_for_ref,
+    )
+
+    assert (
+        main(
+            [
+                "--db",
+                str(db),
+                "connector-ingest",
+                "https://www.youtube.com/watch?v=abc123",
+                "--connector",
+                "youtube",
+                "--skip-existing",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["skipped"] is True
+
+
+def test_connector_ingest_does_not_apply_youtube_hint_to_non_youtube_query(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    db = tmp_path / "undertone.db"
+    _save_existing_transcript(tmp_path, db, "youtube-abc123")
+    capsys.readouterr()
+
+    class FakeConnector:
+        name = "fixture"
+        source_kind = "fixture-audio"
+
+        def matches(self, ref):
+            return True
+
+        def fetch(self, ref):
+            from undertone_audio.connectors import ConnectorAsset
+
+            path = tmp_path / "fixture.wav"
+            path.write_bytes(b"audio")
+            return ConnectorAsset(
+                audio_path=path,
+                source_url=ref,
+                source_kind="fixture-audio",
+                transcript_id_hint="fixture-abc123",
+                metadata={"source": "fixture"},
+            )
+
+    class FakeEngine:
+        async def transcribe(self, audio_path: Path):
+            return RawTranscript(
+                duration_ms=1000,
+                language="en",
+                engine="fixture",
+                speakers=[Speaker(speaker_id="S1")],
+                segments=[
+                    Segment(
+                        segment_id="s1",
+                        speaker_id="S1",
+                        start_ms=0,
+                        end_ms=1000,
+                        text="not youtube",
+                    )
+                ],
+            )
+
+    monkeypatch.setattr(
+        "undertone_audio.commands.connectors.connector_for_ref",
+        lambda ref, preferred=None: FakeConnector(),
+    )
+    monkeypatch.setattr("undertone_audio.commands.connectors.create_engine", lambda name, config: FakeEngine())
+    monkeypatch.setenv("UNDERTONE_WEBHOOK_ENABLED", "0")
+
+    assert (
+        main(
+            [
+                "--db",
+                str(db),
+                "connector-ingest",
+                "https://example.com/file.mp3?v=abc123",
+                "--skip-existing",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["transcript_id"] == "fixture-abc123"
+
+
+def test_connector_ingest_preferred_connector_disables_builtin_early_hint(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    db = tmp_path / "undertone.db"
+    _save_existing_transcript(tmp_path, db, "youtube-abc123")
+    capsys.readouterr()
+
+    class FakeConnector:
+        name = "fixture"
+        source_kind = "fixture-audio"
+
+        def fetch(self, ref):
+            from undertone_audio.connectors import ConnectorAsset
+
+            path = tmp_path / "fixture.wav"
+            path.write_bytes(b"audio")
+            return ConnectorAsset(
+                audio_path=path,
+                source_url=ref,
+                source_kind="fixture-audio",
+                transcript_id_hint="fixture-youtube-url",
+                metadata={"source": "fixture"},
+            )
+
+    class FakeEngine:
+        async def transcribe(self, audio_path: Path):
+            return RawTranscript(
+                duration_ms=1000,
+                language="en",
+                engine="fixture",
+                speakers=[Speaker(speaker_id="S1")],
+                segments=[
+                    Segment(
+                        segment_id="s1",
+                        speaker_id="S1",
+                        start_ms=0,
+                        end_ms=1000,
+                        text="preferred",
+                    )
+                ],
+            )
+
+    monkeypatch.setattr(
+        "undertone_audio.commands.connectors.connector_for_ref",
+        lambda ref, preferred=None: FakeConnector(),
+    )
+    monkeypatch.setattr("undertone_audio.commands.connectors.create_engine", lambda name, config: FakeEngine())
+    monkeypatch.setenv("UNDERTONE_WEBHOOK_ENABLED", "0")
+
+    assert (
+        main(
+            [
+                "--db",
+                str(db),
+                "connector-ingest",
+                "https://www.youtube.com/watch?v=abc123",
+                "--connector",
+                "fixture",
+                "--skip-existing",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["transcript_id"] == "fixture-youtube-url"
+
+
+def test_connector_ingest_skip_existing_does_not_fetch_for_known_direct_podcast_ref(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    from undertone_audio.connectors.podcast import _stable_id
+
+    url = "https://example.com/episode.mp3"
+    db = tmp_path / "undertone.db"
+    _save_existing_transcript(tmp_path, db, f"podcast-{_stable_id(url)}")
+    capsys.readouterr()
+
+    def fail_connector_for_ref(ref, preferred=None):
+        raise AssertionError("connector should not be resolved")
+
+    monkeypatch.setattr(
+        "undertone_audio.commands.connectors.connector_for_ref",
+        fail_connector_for_ref,
+    )
+
+    assert (
+        main(
+            [
+                "--db",
+                str(db),
+                "connector-ingest",
+                url,
+                "--skip-existing",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["skipped"] is True
+
+
+def test_youtube_ingest_skip_existing_does_not_fetch_when_video_id_known(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    db = tmp_path / "undertone.db"
+    _save_existing_transcript(tmp_path, db, "youtube-abc123")
+    capsys.readouterr()
+
+    class FailingYouTubeConnector:
+        def __init__(self, **kwargs):
+            raise AssertionError("youtube connector should not be constructed")
+
+    monkeypatch.setattr(
+        "undertone_audio.commands.connectors.YouTubeConnector",
+        FailingYouTubeConnector,
+    )
+
+    assert (
+        main(
+            [
+                "--db",
+                str(db),
+                "youtube-ingest",
+                "https://www.youtube.com/watch?v=abc123",
+                "--skip-existing",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["skipped"] is True
+
+
+def test_podcast_ingest_skip_existing_does_not_fetch_when_transcript_id_known(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    db = tmp_path / "undertone.db"
+    _save_existing_transcript(tmp_path, db, "existing-podcast")
+    capsys.readouterr()
+
+    class FailingPodcastConnector:
+        def __init__(self, **kwargs):
+            raise AssertionError("podcast connector should not be constructed")
+
+    monkeypatch.setattr(
+        "undertone_audio.commands.connectors.PodcastConnector",
+        FailingPodcastConnector,
+    )
+
+    assert (
+        main(
+            [
+                "--db",
+                str(db),
+                "podcast-ingest",
+                "https://example.com/feed.xml",
+                "--transcript-id",
+                "existing-podcast",
+                "--skip-existing",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["skipped"] is True
+
+
+def test_podcast_direct_url_skip_existing_does_not_fetch_when_hint_known(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    from undertone_audio.connectors.podcast import _stable_id
+
+    url = "https://example.com/episode.mp3"
+    db = tmp_path / "undertone.db"
+    _save_existing_transcript(tmp_path, db, f"podcast-{_stable_id(url)}")
+    capsys.readouterr()
+
+    class FailingPodcastConnector:
+        def __init__(self, **kwargs):
+            raise AssertionError("podcast connector should not be constructed")
+
+    monkeypatch.setattr(
+        "undertone_audio.commands.connectors.PodcastConnector",
+        FailingPodcastConnector,
+    )
+
+    assert (
+        main(
+            [
+                "--db",
+                str(db),
+                "podcast-ingest",
+                url,
+                "--skip-existing",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["skipped"] is True
+
+
+def test_connector_discovery_skips_broken_entry_point(monkeypatch):
+    class BrokenEntryPoint:
+        name = "broken"
+
+        def load(self):
+            raise RuntimeError("bad plugin")
+
+    monkeypatch.setattr(
+        "undertone_audio.connectors.base.entry_points",
+        lambda group=None: [BrokenEntryPoint()] if group == "undertone.connectors" else [],
+    )
+
+    names = [connector.name for connector in discover_connectors()]
+    assert "youtube" in names
+    assert "podcast" in names
+
+
+def test_connector_discovery_keeps_builtins_when_valid_third_party_exists(monkeypatch):
+    class ThirdPartyConnector:
+        name = "third"
+        source_kind = "third-party"
+
+        def matches(self, ref):
+            return ref.startswith("third:")
+
+        def fetch(self, ref):
+            raise AssertionError("not used")
+
+    class ThirdPartyEntryPoint:
+        name = "third"
+
+        def load(self):
+            return ThirdPartyConnector
+
+    monkeypatch.setattr(
+        "undertone_audio.connectors.base.entry_points",
+        lambda group=None: [ThirdPartyEntryPoint()] if group == "undertone.connectors" else [],
+    )
+
+    names = [connector.name for connector in discover_connectors()]
+    assert names == ["youtube", "podcast", "third"]
+
+    connector = connector_for_ref("https://www.youtube.com/watch?v=abc123")
+    assert connector.name == "youtube"
+
+
+def test_connector_discovery_rejects_duplicate_names(monkeypatch):
+    class DuplicateConnector:
+        name = "youtube"
+        source_kind = "duplicate"
+
+        def matches(self, ref):
+            return False
+
+        def fetch(self, ref):
+            raise AssertionError("not used")
+
+    class DuplicateEntryPoint:
+        def __init__(self, name):
+            self.name = name
+
+        def load(self):
+            return DuplicateConnector
+
+    monkeypatch.setattr(
+        "undertone_audio.connectors.base.entry_points",
+        lambda group=None: [DuplicateEntryPoint("one"), DuplicateEntryPoint("two")]
+        if group == "undertone.connectors"
+        else [],
+    )
+
+    try:
+        discover_connectors()
+    except Exception as exc:
+        assert "duplicate connector name: youtube" in str(exc)
+    else:
+        raise AssertionError("duplicate connector names should fail")
+
+
+def test_connector_ingest_rejects_bad_fetch_return(monkeypatch, tmp_path, capsys):
+    class BadConnector:
+        name = "bad"
+        source_kind = "bad"
+
+        def matches(self, ref):
+            return True
+
+        def fetch(self, ref):
+            return {"audio_path": "not-an-asset"}
+
+    monkeypatch.setattr(
+        "undertone_audio.commands.connectors.connector_for_ref",
+        lambda ref, preferred=None: BadConnector(),
+    )
+
+    assert (
+        main(
+            [
+                "--db",
+                str(tmp_path / "undertone.db"),
+                "connector-ingest",
+                "bad:anything",
+            ]
+        )
+        == 1
+    )
+    assert "expected ConnectorAsset" in capsys.readouterr().err
+
+
+def _save_existing_transcript(tmp_path, db: Path, transcript_id: str) -> None:
+    raw_path = tmp_path / f"{transcript_id}.json"
+    raw_path.write_text(
+        json.dumps(
+            {
+                "duration_ms": 1000,
+                "language": "en",
+                "engine": "fixture",
+                "speakers": [{"speaker_id": "S1"}],
+                "segments": [
+                    {
+                        "segment_id": "s1",
+                        "speaker_id": "S1",
+                        "start_ms": 0,
+                        "end_ms": 1000,
+                        "text": "existing",
+                    }
+                ],
+            }
+        )
+    )
+    assert main(["--db", str(db), "finalize-json", str(raw_path), "--transcript-id", transcript_id]) == 0
+
+
+def test_connector_asset_rejects_unsupported_schema_version(tmp_path):
+    from undertone_audio.connectors import ConnectorAsset, ConnectorError
+
+    asset = ConnectorAsset(
+        audio_path=tmp_path / "audio.wav",
+        source_url="fixture:audio",
+        source_kind="fixture",
+        schema_version="2",
+    )
+
+    try:
+        asset.to_schema()
+    except ConnectorError as exc:
+        assert "unsupported ConnectorAsset schema_version" in str(exc)
+    else:
+        raise AssertionError("unsupported connector asset version should fail")
 
 
 def test_youtube_dry_run_passes_cli_process_timeout(monkeypatch, capsys):

@@ -258,11 +258,12 @@ def test_quill_ingest_missing_db_names_fix(tmp_path, capsys):
                 str(missing_meetings),
             ]
         )
-        == 0
+        == 1
     )
-    output = capsys.readouterr().out
-    assert "Quill DB not found" in output
-    assert "undertone doctor" in output
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Quill DB not found" in captured.err
+    assert "undertone doctor" in captured.err
 
 
 def test_quill_ingest_explicit_meeting_transcription_crash_exits_nonzero(tmp_path, monkeypatch, capsys):
@@ -302,7 +303,121 @@ def test_quill_ingest_explicit_meeting_transcription_crash_exits_nonzero(tmp_pat
     monkeypatch.setenv("UNDERTONE_WEBHOOK_ENABLED", "0")
 
     assert main(["--db", str(tmp_path / "z.db"), "quill-ingest", "m1"]) == 1
-    assert "transcription crashed" in capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "transcription crashed" in captured.err
+
+
+def test_quill_ingest_explicit_source_failure_progress_json_is_error(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    from undertone_audio.sources.quill import QuillMeeting
+
+    meeting = QuillMeeting(meeting_id="m1", title="Title", word_count=5)
+
+    class FakeQuillSource:
+        def __init__(self, db_path, meetings_dir, **kwargs):
+            pass
+
+        def meeting(self, meeting_id):
+            return meeting
+
+        def local_audio_for_meeting(self, meeting_id):
+            raise RuntimeError("no local audio")
+
+    monkeypatch.setattr("undertone_audio.commands.sources.QuillSource", FakeQuillSource)
+
+    assert (
+        main(
+            [
+                "--db",
+                str(tmp_path / "z.db"),
+                "quill-ingest",
+                "m1",
+                "--progress",
+                "json",
+            ]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    payload = json.loads(captured.err)
+    assert payload["event"] == "error"
+    assert payload["error"] == "no local audio"
+
+
+def test_quill_ingest_explicit_meeting_keeps_report_off_stdout(tmp_path, monkeypatch, capsys):
+    from undertone_audio.schema import Segment, Speaker
+    from undertone_audio.sources.quill import QuillMeeting
+
+    audio = tmp_path / "m1.wav"
+    audio.write_bytes(b"x")
+    meeting = QuillMeeting(meeting_id="m1", title="Title", word_count=5, combined=audio)
+
+    class FakeQuillSource:
+        def __init__(self, db_path, meetings_dir, **kwargs):
+            pass
+
+        def meeting(self, meeting_id):
+            return meeting
+
+        def local_audio_for_meeting(self, meeting_id):
+            return audio, meeting
+
+        def recorded_at(self, hydrated):
+            return None
+
+        def source_metadata(self, hydrated):
+            return {"source": "quill"}
+
+    class FakeEngine:
+        name = "fake"
+
+        async def transcribe(self, audio_path):
+            from undertone_audio.engines.base import RawTranscript
+
+            return RawTranscript(
+                duration_ms=1000,
+                language="en",
+                engine="fixture",
+                speakers=[Speaker(speaker_id="S1")],
+                segments=[
+                    Segment(
+                        segment_id="s1",
+                        speaker_id="S1",
+                        start_ms=0,
+                        end_ms=1000,
+                        text="quill transcript",
+                    )
+                ],
+            )
+
+    monkeypatch.setattr("undertone_audio.commands.sources.QuillSource", FakeQuillSource)
+    monkeypatch.setattr("undertone_audio.commands.sources.create_engine", lambda name, config: FakeEngine())
+    monkeypatch.setenv("UNDERTONE_WEBHOOK_ENABLED", "0")
+
+    assert (
+        main(
+            [
+                "--db",
+                str(tmp_path / "z.db"),
+                "quill-ingest",
+                "m1",
+                "--json",
+                "--voice-metrics",
+                "off",
+            ]
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    transcript = json.loads(captured.out)
+    assert transcript["transcript_id"] == "m1"
+    assert transcript["segments"][0]["text"] == "quill transcript"
+    assert "ingested" not in transcript
 
 
 def test_quill_ingest_missing_db_graceful_even_when_engine_unavailable(tmp_path, monkeypatch, capsys):
@@ -324,9 +439,11 @@ def test_quill_ingest_missing_db_graceful_even_when_engine_unavailable(tmp_path,
                 str(tmp_path / "none"),
             ]
         )
-        == 0
+        == 1
     )
-    assert "Quill DB not found" in capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Quill DB not found" in captured.err
 
 
 def test_quill_ingest_duplicate_refused_before_engine_construction(tmp_path, monkeypatch, capsys):
@@ -371,6 +488,45 @@ def test_quill_ingest_duplicate_refused_before_engine_construction(tmp_path, mon
     assert "already exists" in capsys.readouterr().err
 
 
+def test_quill_ingest_skip_existing_does_not_construct_source_for_explicit_meeting(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    raw_path = tmp_path / "raw.json"
+    raw_path.write_text(
+        json.dumps(
+            {
+                "duration_ms": 1000,
+                "language": "en",
+                "engine": "fixture",
+                "speakers": [{"speaker_id": "S1"}],
+                "segments": [
+                    {
+                        "segment_id": "s1",
+                        "speaker_id": "S1",
+                        "start_ms": 0,
+                        "end_ms": 1000,
+                        "text": "existing quill",
+                    }
+                ],
+            }
+        )
+    )
+    db = tmp_path / "z.db"
+    assert main(["--db", str(db), "finalize-json", str(raw_path), "--transcript-id", "m1"]) == 0
+    capsys.readouterr()
+
+    class FailingQuillSource:
+        def __init__(self, **kwargs):
+            raise AssertionError("QuillSource should not be constructed")
+
+    monkeypatch.setattr("undertone_audio.commands.sources.QuillSource", FailingQuillSource)
+
+    assert main(["--db", str(db), "quill-ingest", "m1", "--skip-existing"]) == 0
+    assert json.loads(capsys.readouterr().out)["skipped"] is True
+
+
 def test_meet_discover_cli_reports_recording_and_transcript(monkeypatch, capsys):
     from undertone_audio.cli import main
 
@@ -409,6 +565,45 @@ def test_meet_discover_cli_reports_recording_and_transcript(monkeypatch, capsys)
 
     assert main(["meet-discover", "--limit", "1"]) == 0
     assert "Google Meet conference records" in capsys.readouterr().out
+
+
+def test_meet_ingest_skip_existing_does_not_select_source(tmp_path, monkeypatch, capsys):
+    from undertone_audio.commands.sources import _stable_id
+
+    conference_record = "conferenceRecords/abc"
+    transcript_id = "meet-" + _stable_id(conference_record)
+    raw_path = tmp_path / "raw.json"
+    raw_path.write_text(
+        json.dumps(
+            {
+                "duration_ms": 1000,
+                "language": "en",
+                "engine": "fixture",
+                "speakers": [{"speaker_id": "S1"}],
+                "segments": [
+                    {
+                        "segment_id": "s1",
+                        "speaker_id": "S1",
+                        "start_ms": 0,
+                        "end_ms": 1000,
+                        "text": "existing meet",
+                    }
+                ],
+            }
+        )
+    )
+    db = tmp_path / "z.db"
+    assert main(["--db", str(db), "finalize-json", str(raw_path), "--transcript-id", transcript_id]) == 0
+    capsys.readouterr()
+
+    class FailingMeetSource:
+        def __init__(self, **kwargs):
+            raise AssertionError("MeetSource should not be constructed")
+
+    monkeypatch.setattr("undertone_audio.commands.sources.MeetSource", FailingMeetSource)
+
+    assert main(["--db", str(db), "meet-ingest", conference_record, "--skip-existing"]) == 0
+    assert json.loads(capsys.readouterr().out)["skipped"] is True
 
 
 def test_meet_auth_fix_names_scoped_gcloud_command():

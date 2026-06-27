@@ -1,11 +1,6 @@
----
-name: undertone-ingest
-description: Use when ingesting local audio files or raw transcript JSON into Undertone, running transcription or diarization, selecting FluidAudio backends/models, and producing raw/enriched transcripts without source-specific connector behavior.
----
-
 # Undertone Ingest
 
-Use this skill for producing raw/enriched transcripts from local WAV/MP4/M4A files or raw transcript JSON. For Quill and Google Meet, use `skills/undertone-meetings-ingest/SKILL.md`. For YouTube, podcasts, RSS, and direct media URLs, use `skills/undertone-connectors/SKILL.md`.
+Use this skill for producing raw/enriched transcripts from local WAV/MP4/M4A files or raw transcript JSON. For Quill and Google Meet, see `references/meetings.md`. For YouTube, podcasts, RSS, and direct media URLs, see `references/connectors.md`. For speaker fingerprint operations, see `references/fingerprints.md`.
 
 ## Core Rules
 
@@ -21,6 +16,7 @@ Use this skill for producing raw/enriched transcripts from local WAV/MP4/M4A fil
 undertone --db ./undertone.db run-wav ./meeting.wav \
   --engine fluidaudio-hybrid \
   --voice-metrics optional \
+  --progress json \
   --output-format json \
   --output-detail full \
   --output ./meeting.json
@@ -40,6 +36,10 @@ undertone --db ./undertone.db finalize-json raw-transcript.json \
 
 `run-wav` and `finalize-json` fail with a nonzero exit instead of silently overwriting an existing transcript id. Pass `--force` to overwrite the existing transcript, or `--skip-existing` to no-op when the target id already exists. The same guard applies to every ingest path, including connectors and meeting sources.
 
+## Progress Events
+
+Use `--progress json` for queue integrations. Progress events are JSONL on stderr; transcript JSON/stdout stays clean.
+
 ## Model Flags
 
 ```bash
@@ -55,6 +55,8 @@ undertone run-wav ./meeting.wav \
 
 FluidAudio model selections are passed to the FluidAudio boundary. Pyannote selections configure the optional in-process `fluidaudio-pyannote` backend. Unsupported combinations should fail during audio processing rather than being recorded as metadata-only choices.
 
+Speaker fingerprints are namespaced by the effective embedding model. For `fluidaudio-pyannote`, the fingerprint model is the resolved pyannote model; otherwise it is `UNDERTONE_EMBEDDING_MODEL` / `--embedding-model`. Legacy fingerprints with no model tag are dormant and should trigger `doctor`/ingest warnings. Use `fingerprint-adopt-model --dry-run` only when asserting that old vectors were produced by the active model; it does not convert vectors across embedding spaces.
+
 ## External Process Bounds
 
 FluidAudio and ffmpeg/ffprobe subprocesses are bounded. Use `--process-timeout-seconds` or `UNDERTONE_PROCESS_TIMEOUT_SECONDS` to adjust the limit for long media. The default is `7200`; set `0` only when intentionally disabling subprocess timeouts.
@@ -62,6 +64,15 @@ FluidAudio and ffmpeg/ffprobe subprocesses are bounded. Use `--process-timeout-s
 ## Speaker Fingerprint Gates
 
 Fingerprinting is duration-gated on every engine, not just pyannote. A speaker with less than the enroll threshold of total talk time does not mint a durable cross-recording fingerprint, and a sample below the update threshold is not folded into a stored centroid. This is deliberate: short, noisy speakers are the main source of garbage identities. A brief speaker still appears in the transcript with per-recording diarization; it just does not get a stable durable identity.
+
+## Confidence Fields
+
+- Word ASR confidence is preserved as `words[].confidence`.
+- Segment ASR confidence is derived as `segments[].asr_confidence`.
+- `segments[].diarization_quality` is nullable.
+- `fluidaudio-cli` preserves FluidAudio process `qualityScore`.
+- `fluidaudio-hybrid` overlap-maps process `qualityScore` onto Sortformer spans when possible; partial coverage is expected.
+- `fluidaudio-pyannote` emits `null` for diarization quality because pyannote's public `DiarizeOutput` does not expose per-span confidence or posteriors.
 
 ## Pyannote Backend
 
