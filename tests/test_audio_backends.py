@@ -17,7 +17,7 @@ from undertone_audio.engines.fluidaudio_pyannote import (
     pyannote_output_to_sortformer_json,
     resolve_pyannote_model,
 )
-from undertone_audio.schema import Segment, Speaker
+from undertone_audio.schema import EnrichedTranscript, Segment, Speaker, TranscriptMetadata
 from undertone_audio.storage import TranscriptStore
 
 
@@ -525,6 +525,165 @@ def test_fingerprint_update_mean_is_model_guarded(tmp_path):
         ).fetchone()
         assert row["sample_count"] == 1
         assert row["embedding_model"] == "model-a"
+    finally:
+        store.close()
+
+
+def test_discarded_fingerprint_is_not_matched_or_updated(tmp_path):
+    db = tmp_path / "undertone.db"
+    store = TranscriptStore(db)
+    try:
+        fingerprints = SpeakerFingerprintStore(db, similarity_threshold=0.95)
+        speakers, plan = fingerprints.assign_fingerprints(
+            [Speaker(speaker_id="S1", embedding=[1.0, 0.0])],
+            persist=False,
+            speaker_durations_ms={"S1": 16000},
+        )
+        original_id = speakers[0].fingerprint_id
+        plan.commit()
+
+        store.discard_fingerprint(original_id, "mixed speaker")
+        matched, next_plan = fingerprints.assign_fingerprints(
+            [Speaker(speaker_id="S2", embedding=[1.0, 0.0])],
+            persist=False,
+            speaker_durations_ms={"S2": 16000},
+        )
+        next_plan.commit()
+
+        assert matched[0].fingerprint_id is not None
+        assert matched[0].fingerprint_id != original_id
+        rows = store._conn.execute(
+            "SELECT fingerprint_id, sample_count, status FROM speaker_fingerprints ORDER BY fingerprint_id"
+        ).fetchall()
+        assert len(rows) == 2
+        discarded = next(row for row in rows if row["fingerprint_id"] == original_id)
+        assert discarded["status"] == "discarded"
+        assert discarded["sample_count"] == 1
+    finally:
+        store.close()
+
+
+def test_stale_match_plan_does_not_update_discarded_fingerprint(tmp_path):
+    db = tmp_path / "undertone.db"
+    store = TranscriptStore(db)
+    try:
+        fingerprints = SpeakerFingerprintStore(db, similarity_threshold=0.95)
+        speakers, plan = fingerprints.assign_fingerprints(
+            [Speaker(speaker_id="S1", embedding=[1.0, 0.0])],
+            persist=False,
+            speaker_durations_ms={"S1": 16000},
+        )
+        fingerprint_id = speakers[0].fingerprint_id
+        plan.commit()
+
+        matched, stale_plan = fingerprints.assign_fingerprints(
+            [Speaker(speaker_id="S2", embedding=[0.99, 0.01])],
+            persist=False,
+            speaker_durations_ms={"S2": 16000},
+        )
+        assert matched[0].fingerprint_id == fingerprint_id
+
+        store.discard_fingerprint(fingerprint_id, "discarded before commit")
+        stale_plan.commit()
+
+        row = store._conn.execute(
+            "SELECT sample_count, status FROM speaker_fingerprints WHERE fingerprint_id = ?",
+            (fingerprint_id,),
+        ).fetchone()
+        assert row["status"] == "discarded"
+        assert row["sample_count"] == 1
+    finally:
+        store.close()
+
+
+def test_stale_match_plan_does_not_attach_discarded_fingerprint_to_saved_transcript(tmp_path):
+    db = tmp_path / "undertone.db"
+    store = TranscriptStore(db)
+    try:
+        fingerprints = SpeakerFingerprintStore(db, similarity_threshold=0.95)
+        speakers, plan = fingerprints.assign_fingerprints(
+            [Speaker(speaker_id="S1", embedding=[1.0, 0.0], display_name="Old Match")],
+            persist=False,
+            speaker_durations_ms={"S1": 16000},
+        )
+        fingerprint_id = speakers[0].fingerprint_id
+        plan.commit()
+
+        matched, stale_plan = fingerprints.assign_fingerprints(
+            [Speaker(speaker_id="S2", embedding=[0.99, 0.01])],
+            persist=False,
+            speaker_durations_ms={"S2": 16000},
+        )
+        assert matched[0].fingerprint_id == fingerprint_id
+        stale_plan.sources.append((fingerprint_id, "stale-transcript", "S2"))
+
+        store.discard_fingerprint(fingerprint_id, "discarded before save")
+        transcript = EnrichedTranscript(
+            transcript_id="stale-transcript",
+            metadata=TranscriptMetadata(duration_ms=16000, engine="fixture"),
+            speakers=matched,
+            segments=[
+                Segment(
+                    segment_id="seg1",
+                    speaker_id="S2",
+                    start_ms=0,
+                    end_ms=16000,
+                    text="stale plan transcript",
+                )
+            ],
+        )
+        store.save_with_fingerprint_plan(transcript, stale_plan, fingerprints)
+
+        fingerprint_row = store._conn.execute(
+            "SELECT sample_count, status FROM speaker_fingerprints WHERE fingerprint_id = ?",
+            (fingerprint_id,),
+        ).fetchone()
+        speaker_row = store._conn.execute(
+            "SELECT fingerprint_id FROM speakers WHERE transcript_id = ? AND speaker_id = ?",
+            ("stale-transcript", "S2"),
+        ).fetchone()
+        source_count = store._conn.execute(
+            "SELECT COUNT(*) FROM fingerprint_sources WHERE fingerprint_id = ?",
+            (fingerprint_id,),
+        ).fetchone()[0]
+        assert fingerprint_row["status"] == "discarded"
+        assert fingerprint_row["sample_count"] == 1
+        assert speaker_row["fingerprint_id"] is None
+        assert source_count == 0
+    finally:
+        store.close()
+
+
+def test_restored_fingerprint_matches_again(tmp_path):
+    db = tmp_path / "undertone.db"
+    store = TranscriptStore(db)
+    try:
+        fingerprints = SpeakerFingerprintStore(db, similarity_threshold=0.95)
+        speakers, plan = fingerprints.assign_fingerprints(
+            [Speaker(speaker_id="S1", embedding=[1.0, 0.0])],
+            persist=False,
+            speaker_durations_ms={"S1": 16000},
+        )
+        fingerprint_id = speakers[0].fingerprint_id
+        plan.commit()
+
+        store.discard_fingerprint(fingerprint_id, "test")
+        store.restore_fingerprint(fingerprint_id)
+        matched, plan = fingerprints.assign_fingerprints(
+            [Speaker(speaker_id="S2", embedding=[0.99, 0.01])],
+            persist=False,
+            speaker_durations_ms={"S2": 16000},
+        )
+        plan.commit()
+
+        assert matched[0].fingerprint_id == fingerprint_id
+        row = store._conn.execute(
+            "SELECT sample_count, status, discard_reason FROM speaker_fingerprints WHERE fingerprint_id = ?",
+            (fingerprint_id,),
+        ).fetchone()
+        assert row["sample_count"] == 2
+        assert row["status"] == "active"
+        assert row["discard_reason"] is None
     finally:
         store.close()
 

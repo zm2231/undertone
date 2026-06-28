@@ -108,6 +108,8 @@ class TranscriptStore:
                 sample_count INTEGER NOT NULL DEFAULT 1,
                 embedding_model TEXT,
                 embedding_dimension INTEGER,
+                status TEXT NOT NULL DEFAULT 'active',
+                discard_reason TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
@@ -143,6 +145,8 @@ class TranscriptStore:
         columns = {
             "embedding_model": "TEXT",
             "embedding_dimension": "INTEGER",
+            "status": "TEXT NOT NULL DEFAULT 'active'",
+            "discard_reason": "TEXT",
         }
         for name, definition in columns.items():
             if name not in existing:
@@ -151,6 +155,11 @@ class TranscriptStore:
             """UPDATE speaker_fingerprints
                SET embedding_dimension = length(embedding) / 4
                WHERE embedding_dimension IS NULL"""
+        )
+        self._conn.execute(
+            """UPDATE speaker_fingerprints
+               SET status = 'active'
+               WHERE status IS NULL"""
         )
         self._conn.commit()
 
@@ -182,10 +191,36 @@ class TranscriptStore:
             if fingerprint_plan is not None:
                 store = fingerprint_store or SpeakerFingerprintStore(self.db_path)
                 store.apply_plan_on_conn(self._conn, fingerprint_plan)
+                self._clear_inactive_plan_speaker_refs(transcript.transcript_id, fingerprint_plan)
             self._conn.commit()
         except Exception:
             self._conn.rollback()
             raise
+
+    def _clear_inactive_plan_speaker_refs(
+        self,
+        transcript_id: str,
+        fingerprint_plan: FingerprintAssignmentPlan,
+    ) -> None:
+        fingerprint_ids = {fingerprint_id for fingerprint_id, _embedding in fingerprint_plan.matches}
+        fingerprint_ids.update(
+            fingerprint_id for fingerprint_id, _transcript_id, _speaker_id in fingerprint_plan.sources
+        )
+        if not fingerprint_ids:
+            return
+        placeholders = ",".join("?" for _ in fingerprint_ids)
+        self._conn.execute(
+            f"""UPDATE speakers
+                SET fingerprint_id = NULL
+                WHERE transcript_id = ?
+                  AND fingerprint_id IN ({placeholders})
+                  AND EXISTS (
+                      SELECT 1 FROM speaker_fingerprints AS f
+                      WHERE f.fingerprint_id = speakers.fingerprint_id
+                        AND f.status = 'discarded'
+                  )""",
+            (transcript_id, *sorted(fingerprint_ids)),
+        )
 
     def _save_within_transaction(
         self,
@@ -483,7 +518,8 @@ class TranscriptStore:
         rows = []
         for row in self._conn.execute(
             """SELECT fingerprint_id, embedding, display_name, sample_count,
-                      embedding_model, embedding_dimension, created_at, updated_at
+                      embedding_model, embedding_dimension, status, discard_reason,
+                      created_at, updated_at
                FROM speaker_fingerprints ORDER BY fingerprint_id"""
         ):
             rows.append(
@@ -494,6 +530,8 @@ class TranscriptStore:
                     "sample_count": row["sample_count"],
                     "embedding_model": row["embedding_model"],
                     "embedding_dimension": row["embedding_dimension"],
+                    "status": row["status"],
+                    "discard_reason": row["discard_reason"],
                     "created_at": row["created_at"],
                     "updated_at": row["updated_at"],
                 }
@@ -547,6 +585,7 @@ class TranscriptStore:
                 """UPDATE speaker_fingerprints
                    SET embedding = ?, display_name = ?, sample_count = ?,
                        embedding_model = ?, embedding_dimension = ?,
+                       status = ?, discard_reason = ?,
                        created_at = COALESCE(?, created_at),
                        updated_at = COALESCE(?, CURRENT_TIMESTAMP)
                    WHERE fingerprint_id = ?""",
@@ -556,6 +595,8 @@ class TranscriptStore:
                     row.get("sample_count", 1),
                     row.get("embedding_model"),
                     row.get("embedding_dimension"),
+                    row.get("status", "active"),
+                    row.get("discard_reason"),
                     row.get("created_at"),
                     row.get("updated_at"),
                     row["fingerprint_id"],
@@ -566,8 +607,9 @@ class TranscriptStore:
             self._conn.execute(
                 """INSERT INTO speaker_fingerprints
                    (fingerprint_id, embedding, display_name, sample_count,
-                    embedding_model, embedding_dimension, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))""",
+                    embedding_model, embedding_dimension, status, discard_reason,
+                    created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))""",
                 (
                     row["fingerprint_id"],
                     _vec_to_blob(row["embedding"]),
@@ -575,6 +617,8 @@ class TranscriptStore:
                     row.get("sample_count", 1),
                     row.get("embedding_model"),
                     row.get("embedding_dimension"),
+                    row.get("status", "active"),
+                    row.get("discard_reason"),
                     row.get("created_at"),
                     row.get("updated_at"),
                 ),
@@ -618,6 +662,10 @@ class TranscriptStore:
             raise ValueError(f"source fingerprint not found: {source}")
         if target_row is None:
             raise ValueError(f"target fingerprint not found: {target}")
+        if source_row["status"] != "active":
+            raise ValueError(f"source fingerprint is not active: {source}")
+        if target_row["status"] != "active":
+            raise ValueError(f"target fingerprint is not active: {target}")
         source_vec = _blob_to_vec(source_row["embedding"])
         target_vec = _blob_to_vec(target_row["embedding"])
         if source_row["embedding_model"] != target_row["embedding_model"]:
@@ -684,12 +732,41 @@ class TranscriptStore:
         self._conn.execute("DELETE FROM fingerprint_sources WHERE fingerprint_id = ?", (source,))
         self._conn.execute("DELETE FROM speaker_fingerprints WHERE fingerprint_id = ?", (source,))
 
+    def fingerprint_status_counts(self) -> dict:
+        columns = self._table_columns("speaker_fingerprints")
+        if "status" in columns:
+            rows = self._conn.execute(
+                """SELECT status, COUNT(*) AS count
+                   FROM speaker_fingerprints
+                   GROUP BY status"""
+            )
+        else:
+            rows = self._conn.execute(
+                """SELECT 'active' AS status, COUNT(*) AS count
+                   FROM speaker_fingerprints"""
+            )
+        by_status = {row["status"] or "active": row["count"] for row in rows}
+        active = by_status.get("active", 0)
+        discarded = by_status.get("discarded", 0)
+        total = sum(by_status.values())
+        return {
+            "active": active,
+            "discarded": discarded,
+            "total": total,
+            "by_status": [
+                {"status": status, "count": count}
+                for status, count in sorted(by_status.items())
+            ],
+        }
+
     def fingerprint_model_counts(self, active_model: str | None) -> dict:
         columns = self._table_columns("speaker_fingerprints")
         if "embedding_model" in columns:
+            where = "WHERE status = 'active'" if "status" in columns else ""
             rows = self._conn.execute(
-                """SELECT embedding_model, COUNT(*) AS count
+                f"""SELECT embedding_model, COUNT(*) AS count
                    FROM speaker_fingerprints
+                   {where}
                    GROUP BY embedding_model"""
             )
         else:
@@ -727,15 +804,22 @@ class TranscriptStore:
     ) -> dict:
         columns = self._table_columns("speaker_fingerprints")
         has_model_column = "embedding_model" in columns
-        where = "embedding_model IS NULL" if only_legacy and has_model_column else "1 = 1"
+        has_status_column = "status" in columns
+        where = []
+        if only_legacy and has_model_column:
+            where.append("embedding_model IS NULL")
+        if has_status_column:
+            where.append("status = 'active'")
+        where_sql = " AND ".join(where) if where else "1 = 1"
         model_projection = "embedding_model" if has_model_column else "NULL AS embedding_model"
+        status_projection = "status" if has_status_column else "'active' AS status"
         rows = [
             dict(row)
             for row in self._conn.execute(
                 f"""SELECT fingerprint_id, display_name, sample_count,
-                           {model_projection}
+                           {model_projection}, {status_projection}
                     FROM speaker_fingerprints
-                    WHERE {where}
+                    WHERE {where_sql}
                     ORDER BY fingerprint_id"""
             )
         ]
@@ -753,15 +837,128 @@ class TranscriptStore:
         try:
             self._conn.execute("BEGIN IMMEDIATE")
             plan = self.fingerprint_adopt_model_plan(embedding_model, only_legacy=only_legacy)
-            where = "embedding_model IS NULL" if only_legacy else "1 = 1"
+            where = ["status = 'active'"]
+            if only_legacy:
+                where.append("embedding_model IS NULL")
+            where_sql = " AND ".join(where)
             self._conn.execute(
                 f"""UPDATE speaker_fingerprints
                     SET embedding_model = ?,
                         embedding_dimension = COALESCE(embedding_dimension, length(embedding) / 4),
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE {where}""",
+                    WHERE {where_sql}""",
                 (embedding_model,),
             )
+            self._conn.commit()
+            plan["dry_run"] = False
+            return plan
+        except Exception:
+            self._conn.rollback()
+            raise
+
+    def fingerprint_action_plan(
+        self,
+        fingerprint_id: str,
+        *,
+        action: str,
+        reason: str | None = None,
+    ) -> dict:
+        row = self._conn.execute(
+            """SELECT fingerprint_id, display_name, sample_count, embedding_model,
+                      embedding_dimension, status, discard_reason
+               FROM speaker_fingerprints
+               WHERE fingerprint_id = ?""",
+            (fingerprint_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"fingerprint not found: {fingerprint_id}")
+        if action not in {"discard", "restore", "destroy"}:
+            raise ValueError(f"unknown fingerprint action: {action}")
+        current = dict(row)
+        target_status = current["status"]
+        target_reason = current["discard_reason"]
+        will_write = False
+        if action == "discard":
+            clean_reason = (reason or "").strip()
+            if not clean_reason:
+                raise ValueError("fingerprint-discard requires a non-empty --reason")
+            target_status = "discarded"
+            target_reason = clean_reason
+            will_write = current["status"] != target_status or current["discard_reason"] != target_reason
+        elif action == "restore":
+            target_status = "active"
+            target_reason = None
+            will_write = current["status"] != target_status or current["discard_reason"] is not None
+        elif action == "destroy":
+            will_write = True
+        source_count = self._conn.execute(
+            "SELECT COUNT(*) AS count FROM fingerprint_sources WHERE fingerprint_id = ?",
+            (fingerprint_id,),
+        ).fetchone()["count"]
+        speaker_count = self._conn.execute(
+            "SELECT COUNT(*) AS count FROM speakers WHERE fingerprint_id = ?",
+            (fingerprint_id,),
+        ).fetchone()["count"]
+        return {
+            "operation": f"fingerprint-{action}",
+            "dry_run": True,
+            "fingerprint_id": fingerprint_id,
+            "action": action,
+            "will_write": will_write,
+            "current_status": current["status"],
+            "target_status": None if action == "destroy" else target_status,
+            "current_discard_reason": current["discard_reason"],
+            "target_discard_reason": None if action == "destroy" else target_reason,
+            "display_name": current["display_name"],
+            "sample_count": current["sample_count"],
+            "embedding_model": current["embedding_model"],
+            "embedding_dimension": current["embedding_dimension"],
+            "fingerprint_source_rows": source_count,
+            "speaker_rows_referencing": speaker_count,
+        }
+
+    def discard_fingerprint(self, fingerprint_id: str, reason: str) -> dict:
+        return self._apply_fingerprint_action(
+            fingerprint_id,
+            action="discard",
+            reason=reason,
+        )
+
+    def restore_fingerprint(self, fingerprint_id: str) -> dict:
+        return self._apply_fingerprint_action(fingerprint_id, action="restore")
+
+    def destroy_fingerprint(self, fingerprint_id: str) -> dict:
+        return self._apply_fingerprint_action(fingerprint_id, action="destroy")
+
+    def _apply_fingerprint_action(
+        self,
+        fingerprint_id: str,
+        *,
+        action: str,
+        reason: str | None = None,
+    ) -> dict:
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            plan = self.fingerprint_action_plan(fingerprint_id, action=action, reason=reason)
+            if action == "discard" and plan["will_write"]:
+                self._conn.execute(
+                    """UPDATE speaker_fingerprints
+                       SET status = 'discarded', discard_reason = ?, updated_at = CURRENT_TIMESTAMP
+                       WHERE fingerprint_id = ?""",
+                    (plan["target_discard_reason"], fingerprint_id),
+                )
+            elif action == "restore" and plan["will_write"]:
+                self._conn.execute(
+                    """UPDATE speaker_fingerprints
+                       SET status = 'active', discard_reason = NULL, updated_at = CURRENT_TIMESTAMP
+                       WHERE fingerprint_id = ?""",
+                    (fingerprint_id,),
+                )
+            elif action == "destroy":
+                self._conn.execute(
+                    "DELETE FROM speaker_fingerprints WHERE fingerprint_id = ?",
+                    (fingerprint_id,),
+                )
             self._conn.commit()
             plan["dry_run"] = False
             return plan
@@ -850,6 +1047,7 @@ class TranscriptStore:
             "segment_count": segments,
             "fingerprint_count": fingerprints,
             "fingerprint_models": self.fingerprint_model_counts(active_embedding_model),
+            "fingerprint_status": self.fingerprint_status_counts(),
         }
 
     def fingerprint_excerpts(
@@ -985,6 +1183,12 @@ def _normalize_fingerprint_row(row: dict, index: int) -> dict:
         raise ValueError(
             f"fingerprints[{index}].embedding_dimension must equal embedding length"
         )
+    status = row.get("status", "active")
+    if status not in {"active", "discarded"}:
+        raise ValueError(f"fingerprints[{index}].status must be active or discarded")
+    discard_reason = row.get("discard_reason")
+    if discard_reason is not None and not isinstance(discard_reason, str):
+        raise ValueError(f"fingerprints[{index}].discard_reason must be a string or null")
     return {
         "fingerprint_id": fingerprint_id,
         "embedding": cleaned_embedding,
@@ -992,6 +1196,8 @@ def _normalize_fingerprint_row(row: dict, index: int) -> dict:
         "sample_count": sample_count,
         "embedding_model": embedding_model,
         "embedding_dimension": embedding_dimension,
+        "status": status,
+        "discard_reason": discard_reason,
         "created_at": created_at,
         "updated_at": updated_at,
     }

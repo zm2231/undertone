@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS speaker_fingerprints (
     sample_count INTEGER NOT NULL DEFAULT 1,
     embedding_model TEXT,
     embedding_dimension INTEGER,
+    status TEXT NOT NULL DEFAULT 'active',
+    discard_reason TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

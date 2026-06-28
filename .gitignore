@@ -13,6 +13,7 @@ build/
 .leann/
 
 # Local migration guidance and scratch outputs.
+.claude/
 skills/undertone-migration/
 migration/
 migrations-local/
@@ -23,3 +24,8 @@ migrations-local/
 # should not ship in the public package.
 scripts/
 docs/research/
+
+# Internal docs and agent guidance stay local; public docs live directly in docs/.
+AGENTS.md
+CLAUDE.md
+docs/internal/

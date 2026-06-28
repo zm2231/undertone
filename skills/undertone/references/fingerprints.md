@@ -8,9 +8,10 @@ Voice fingerprints give a speaker a durable, cross-recording identity. Undertone
 undertone --db ./undertone.db fingerprints
 undertone --db ./undertone.db fingerprints --format json
 undertone --db ./undertone.db fingerprints --unnamed --excerpts
+undertone --db ./undertone.db fingerprints --status all
 ```
 
-`fingerprints` lists stored voiceprints with display name, sample count, and embedding model. `--unnamed` filters to the ones still needing a label; `--excerpts` shows sample transcript lines so you can recognize the voice. Add `--json` (or `--format json`) for machine-readable output.
+`fingerprints` lists active voiceprints by default with display name, sample count, status, and embedding model. `--status discarded` or `--status all` shows retired prints. `--unnamed` filters to the ones still needing a label; `--excerpts` shows sample transcript lines so you can recognize the voice. Add `--json` (or `--format json`) for machine-readable output, including `status` and `discard_reason`.
 
 ## Label and relabel
 
@@ -21,6 +22,21 @@ undertone --db ./undertone.db relabel --all
 ```
 
 `fingerprint-label` sets the display name on a voiceprint. `relabel` re-stamps saved transcript speaker names from the current fingerprint DB without re-running ASR, diarization, or enrichment, so it is the cheap "label then fix the back catalog" path. Pass a single transcript id or `--all`; passing both an id and `--all` is rejected.
+
+## Corrective actions
+
+Use discard for a bad, mixed, or over-merged voiceprint. Discard is reversible and keeps the historical row for audit; future ingest ignores discarded prints and mints a fresh fingerprint when that person appears again.
+
+```bash
+undertone --db ./undertone.db fingerprint-discard VP-bad --reason "mixed speaker" --dry-run
+undertone --db ./undertone.db fingerprint-discard VP-bad --reason "mixed speaker" --yes
+undertone --db ./undertone.db fingerprint-restore VP-bad --dry-run
+undertone --db ./undertone.db fingerprint-restore VP-bad --yes
+undertone --db ./undertone.db fingerprint-destroy VP-bad --dry-run
+undertone --db ./undertone.db fingerprint-destroy VP-bad --yes
+```
+
+`fingerprint-discard` sets `status=discarded` and stores `discard_reason`; `fingerprint-restore` makes the print active again. `fingerprint-destroy` permanently deletes the fingerprint row and cascades its `fingerprint_sources` rows. Saved transcript speaker rows keep their historical fingerprint id, so use destroy only when a voiceprint should leave the library entirely.
 
 ## Duration gates
 
@@ -37,7 +53,7 @@ undertone --db ./undertone.db fingerprint-merge VP-spurious VP-canonical --dry-r
 undertone --db ./undertone.db fingerprint-merge VP-spurious VP-canonical --yes
 ```
 
-`--expected-speaker-count` collapses over-detected speakers toward the expected count. `--fingerprint-similarity-threshold` (or `UNDERTONE_SPEAKER_MERGE_THRESHOLD`) controls how aggressively new speakers match an existing voiceprint. `fingerprint-merge` folds a spurious voiceprint into a canonical one and restamps the affected speaker rows; it refuses to merge voiceprints from different embedding models.
+`--expected-speaker-count` collapses over-detected speakers toward the expected count. `--fingerprint-similarity-threshold` (or `UNDERTONE_SPEAKER_MERGE_THRESHOLD`) controls how aggressively new speakers match an existing voiceprint. `fingerprint-merge` folds a spurious active voiceprint into a canonical active one and restamps the affected speaker rows; it refuses to merge discarded prints or voiceprints from different embedding models.
 
 ## Export and import
 
@@ -47,7 +63,7 @@ undertone --db ./undertone.db fingerprint-import ./voiceprints.json --dry-run
 undertone --db ./undertone.db fingerprint-import ./voiceprints.json --yes
 ```
 
-Export and import preserve the embedding model tag, dimension, and timestamps, so a labeled library moves between DBs or machines without losing provenance. Import validates the payload `schema_version` and rejects duplicate fingerprint ids within the file. See `references/upgrades.md` for cross-DB portability and model-namespace details.
+Export and import preserve the embedding model tag, dimension, timestamps, `status`, and `discard_reason`, so a labeled library moves between DBs or machines without losing provenance or accidentally reactivating discarded prints. Import validates the payload `schema_version` and rejects duplicate fingerprint ids within the file. See `references/upgrades.md` for cross-DB portability and model-namespace details.
 
 ## Embedding-model namespace
 
@@ -62,4 +78,4 @@ undertone --db ./undertone.db fingerprint-adopt-model --yes
 
 ## Safety
 
-Fingerprint import, merge, and model adoption are identity-changing operations. Always run `--dry-run` first. Writes require `--yes` and create a timestamped `.bak` SQLite copy beside the active DB before changing rows. A dry-run never mutates the real DB; it plans against a migrated temporary copy and discards it.
+Fingerprint import, merge, model adoption, discard, restore, and destroy are identity-changing operations. Always run `--dry-run` first. Writes require `--yes` and create a timestamped `.bak` SQLite copy beside the active DB before mutating rows. No-op writes do not create backups. A dry-run never mutates the real DB; it plans against a migrated temporary copy and discards it.

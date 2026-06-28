@@ -72,14 +72,14 @@ class SpeakerFingerprintStore:
             query = (
                 "SELECT fingerprint_id, embedding, sample_count, display_name "
                 "FROM speaker_fingerprints "
-                "WHERE embedding_model IS NULL"
+                "WHERE embedding_model IS NULL AND status = 'active'"
             )
             params = ()
         else:
             query = (
                 "SELECT fingerprint_id, embedding, sample_count, display_name "
                 "FROM speaker_fingerprints "
-                "WHERE embedding_model = ?"
+                "WHERE embedding_model = ? AND status = 'active'"
             )
             params = (self.embedding_model,)
         with self._conn() as conn:
@@ -92,6 +92,10 @@ class SpeakerFingerprintStore:
                 )
                 for row in conn.execute(query, params)
             ]
+            existing_ids = {
+                row["fingerprint_id"]
+                for row in conn.execute("SELECT fingerprint_id FROM speaker_fingerprints")
+            }
 
         plan = FingerprintAssignmentPlan(self)
         updated: list[Speaker] = []
@@ -180,7 +184,8 @@ class SpeakerFingerprintStore:
                 )
                 continue
 
-            fingerprint_id = self._mint_fingerprint(speaker.embedding)
+            fingerprint_id = self._mint_available_fingerprint(speaker.embedding, existing_ids)
+            existing_ids.add(fingerprint_id)
             plan.inserts.append(
                 (
                     fingerprint_id,
@@ -228,7 +233,8 @@ class SpeakerFingerprintStore:
                    (fingerprint_id, transcript_id, speaker_id)
                    SELECT ?, ?, ?
                    WHERE EXISTS (
-                       SELECT 1 FROM speaker_fingerprints WHERE fingerprint_id = ?
+                       SELECT 1 FROM speaker_fingerprints
+                       WHERE fingerprint_id = ? AND status = 'active'
                    )""",
                 (fingerprint_id, transcript_id, speaker_id, fingerprint_id),
             )
@@ -243,7 +249,15 @@ class SpeakerFingerprintStore:
             if cursor.rowcount == 0:
                 raise ValueError(f"fingerprint not found: {fingerprint_id}")
 
-    def list_all(self) -> list[tuple[str, str | None, int, str | None]]:
+    def list_all(
+        self,
+        *,
+        status: str = "active",
+    ) -> list[tuple[str, str | None, int, str | None, str, str | None]]:
+        if status not in {"active", "discarded", "all"}:
+            raise ValueError(f"unknown fingerprint status filter: {status}")
+        where = "" if status == "all" else "WHERE status = ?"
+        params = () if status == "all" else (status,)
         with self._conn() as conn:
             return [
                 (
@@ -251,18 +265,39 @@ class SpeakerFingerprintStore:
                     row["display_name"],
                     row["sample_count"],
                     row["embedding_model"],
+                    row["status"],
+                    row["discard_reason"],
                 )
                 for row in conn.execute(
-                    "SELECT fingerprint_id, display_name, sample_count, embedding_model "
-                    "FROM speaker_fingerprints ORDER BY fingerprint_id"
+                    f"""SELECT fingerprint_id, display_name, sample_count,
+                               embedding_model, status, discard_reason
+                        FROM speaker_fingerprints
+                        {where}
+                        ORDER BY fingerprint_id""",
+                    params,
                 )
             ]
 
-    def _mint_fingerprint(self, embedding: list[float]) -> str:
+    def _mint_available_fingerprint(
+        self,
+        embedding: list[float],
+        existing_ids: set[str],
+    ) -> str:
+        fingerprint_id = self._mint_fingerprint(embedding)
+        salt = 1
+        while fingerprint_id in existing_ids:
+            fingerprint_id = self._mint_fingerprint(embedding, salt=salt)
+            salt += 1
+        return fingerprint_id
+
+    def _mint_fingerprint(self, embedding: list[float], *, salt: int = 0) -> str:
         h = hashlib.blake2b(digest_size=8)
         h.update(_vec_to_blob(embedding))
         h.update(b"\0")
         h.update((self.embedding_model or "").encode("utf-8"))
+        if salt:
+            h.update(b"\0")
+            h.update(str(salt).encode("ascii"))
         digest = h.hexdigest()
         return f"VP-{digest}"
 
@@ -292,14 +327,14 @@ class SpeakerFingerprintStore:
             row = conn.execute(
                 """SELECT embedding, sample_count, embedding_model, embedding_dimension
                    FROM speaker_fingerprints
-                   WHERE fingerprint_id = ? AND embedding_model IS NULL""",
+                   WHERE fingerprint_id = ? AND embedding_model IS NULL AND status = 'active'""",
                 (fingerprint_id,),
             ).fetchone()
         else:
             row = conn.execute(
                 """SELECT embedding, sample_count, embedding_model, embedding_dimension
                    FROM speaker_fingerprints
-                   WHERE fingerprint_id = ? AND embedding_model = ?""",
+                   WHERE fingerprint_id = ? AND embedding_model = ? AND status = 'active'""",
                 (fingerprint_id, self.embedding_model),
             ).fetchone()
         if not row:
@@ -316,14 +351,14 @@ class SpeakerFingerprintStore:
             conn.execute(
                 """UPDATE speaker_fingerprints
                    SET embedding = ?, sample_count = sample_count + 1, updated_at = CURRENT_TIMESTAMP
-                   WHERE fingerprint_id = ? AND embedding_model IS NULL""",
+                   WHERE fingerprint_id = ? AND embedding_model IS NULL AND status = 'active'""",
                 (_vec_to_blob(merged), fingerprint_id),
             )
         else:
             conn.execute(
                 """UPDATE speaker_fingerprints
                    SET embedding = ?, sample_count = sample_count + 1, updated_at = CURRENT_TIMESTAMP
-                   WHERE fingerprint_id = ? AND embedding_model = ?""",
+                   WHERE fingerprint_id = ? AND embedding_model = ? AND status = 'active'""",
                 (_vec_to_blob(merged), fingerprint_id, self.embedding_model),
             )
 

@@ -575,6 +575,297 @@ def test_fingerprint_merge_preserves_source_name_when_target_is_unnamed(tmp_path
     assert target_loaded["speakers"][0]["display_name"] == "Source Name"
 
 
+def test_fingerprint_discard_restore_destroy_cli_status_and_backups(tmp_path, capsys):
+    db = tmp_path / "undertone.db"
+    raw_path = tmp_path / "raw.json"
+    raw_path.write_text(
+        json.dumps(
+            {
+                "duration_ms": 16000,
+                "language": "en",
+                "engine": "fixture",
+                "speakers": [{"speaker_id": "S1", "embedding": [1.0, 0.0]}],
+                "segments": [
+                    {
+                        "segment_id": "seg1",
+                        "speaker_id": "S1",
+                        "start_ms": 0,
+                        "end_ms": 16000,
+                        "text": "fingerprint action target",
+                    }
+                ],
+            }
+        )
+    )
+    assert main(["--db", str(db), "finalize-json", str(raw_path), "--transcript-id", "fp-actions"]) == 0
+    fingerprint_id = json.loads(capsys.readouterr().out)["speakers"][0]["fingerprint_id"]
+
+    assert (
+        main(
+            [
+                "--db",
+                str(db),
+                "fingerprint-discard",
+                fingerprint_id,
+                "--reason",
+                "mixed speaker",
+                "--dry-run",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    discard_plan = json.loads(capsys.readouterr().out)
+    assert discard_plan["dry_run"] is True
+    assert discard_plan["will_write"] is True
+    assert discard_plan["target_status"] == "discarded"
+    assert len(list(tmp_path.glob("undertone.db.*.bak"))) == 0
+
+    assert (
+        main(
+            [
+                "--db",
+                str(db),
+                "fingerprint-discard",
+                fingerprint_id,
+                "--reason",
+                "mixed speaker",
+                "--yes",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    discarded = json.loads(capsys.readouterr().out)
+    assert discarded["dry_run"] is False
+    assert Path(discarded["backup_path"]).exists()
+
+    assert main(["--db", str(db), "fingerprints", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
+    assert main(["--db", str(db), "fingerprints", "--status", "all", "--json"]) == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert rows[0]["status"] == "discarded"
+    assert rows[0]["discard_reason"] == "mixed speaker"
+
+    assert (
+        main(["--db", str(db), "fingerprint-restore", fingerprint_id, "--yes", "--json"])
+        == 0
+    )
+    restored = json.loads(capsys.readouterr().out)
+    assert restored["target_status"] == "active"
+    assert restored["target_discard_reason"] is None
+    assert Path(restored["backup_path"]).exists()
+
+    assert (
+        main(["--db", str(db), "fingerprint-restore", fingerprint_id, "--yes", "--json"])
+        == 0
+    )
+    restore_noop = json.loads(capsys.readouterr().out)
+    assert restore_noop["will_write"] is False
+    assert "backup_path" not in restore_noop
+
+    assert (
+        main(["--db", str(db), "fingerprint-destroy", fingerprint_id, "--dry-run", "--json"])
+        == 0
+    )
+    destroy_plan = json.loads(capsys.readouterr().out)
+    assert destroy_plan["fingerprint_source_rows"] == 1
+    assert destroy_plan["speaker_rows_referencing"] == 1
+    assert destroy_plan["will_write"] is True
+
+    assert main(["--db", str(db), "fingerprint-destroy", fingerprint_id, "--yes", "--json"]) == 0
+    destroyed = json.loads(capsys.readouterr().out)
+    assert Path(destroyed["backup_path"]).exists()
+    assert main(["--db", str(db), "fingerprints", "--status", "all", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+    from undertone_audio.storage import TranscriptStore
+
+    store = TranscriptStore(db)
+    try:
+        source_count = store._conn.execute("SELECT COUNT(*) FROM fingerprint_sources").fetchone()[0]
+        speaker_fingerprint = store._conn.execute(
+            "SELECT fingerprint_id FROM speakers WHERE transcript_id = 'fp-actions'"
+        ).fetchone()[0]
+    finally:
+        store.close()
+    assert source_count == 0
+    assert speaker_fingerprint == fingerprint_id
+
+
+def test_fingerprint_action_dry_runs_plan_against_legacy_db_without_migrating_it(tmp_path, capsys):
+    import sqlite3
+
+    db = tmp_path / "legacy-actions.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            """CREATE TABLE speaker_fingerprints (
+                fingerprint_id TEXT PRIMARY KEY,
+                embedding BLOB NOT NULL,
+                display_name TEXT,
+                sample_count INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )"""
+        )
+        conn.execute(
+            "INSERT INTO speaker_fingerprints (fingerprint_id, embedding, sample_count) VALUES (?, ?, 1)",
+            ("VP-legacy", b"\x00" * 8),
+        )
+
+    assert (
+        main(
+            [
+                "--db",
+                str(db),
+                "fingerprint-discard",
+                "VP-legacy",
+                "--reason",
+                "old db probe",
+                "--dry-run",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    discard_plan = json.loads(capsys.readouterr().out)
+    assert discard_plan["current_status"] == "active"
+    assert discard_plan["target_status"] == "discarded"
+
+    assert (
+        main(["--db", str(db), "fingerprint-restore", "VP-legacy", "--dry-run", "--json"])
+        == 0
+    )
+    restore_plan = json.loads(capsys.readouterr().out)
+    assert restore_plan["will_write"] is False
+
+    assert (
+        main(["--db", str(db), "fingerprint-destroy", "VP-legacy", "--dry-run", "--json"])
+        == 0
+    )
+    destroy_plan = json.loads(capsys.readouterr().out)
+    assert destroy_plan["will_write"] is True
+
+    with sqlite3.connect(db) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(speaker_fingerprints)")}
+        row_count = conn.execute("SELECT COUNT(*) FROM speaker_fingerprints").fetchone()[0]
+    assert "status" not in columns
+    assert "discard_reason" not in columns
+    assert row_count == 1
+    assert list(tmp_path.glob("legacy-actions.db.*.bak")) == []
+
+
+def test_fingerprint_export_import_preserves_discarded_status(tmp_path, capsys):
+    db = tmp_path / "undertone.db"
+    path = tmp_path / "fingerprints.json"
+    path.write_text(
+        json.dumps(
+            {
+                "fingerprints": [
+                    {
+                        "fingerprint_id": "VP-discarded",
+                        "embedding": [1.0, 0.0],
+                        "status": "discarded",
+                        "discard_reason": "imported bad print",
+                    }
+                ]
+            }
+        )
+    )
+
+    assert main(["--db", str(db), "fingerprint-import", str(path), "--yes", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["--db", str(db), "fingerprint-export"]) == 0
+    exported = json.loads(capsys.readouterr().out)["fingerprints"][0]
+    assert exported["status"] == "discarded"
+    assert exported["discard_reason"] == "imported bad print"
+
+    assert main(["--db", str(db), "fingerprints", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
+    assert main(["--db", str(db), "fingerprints", "--status", "discarded", "--json"]) == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert rows[0]["fingerprint_id"] == "VP-discarded"
+
+
+def test_fingerprint_status_counts_surface_in_operator_commands(tmp_path, capsys):
+    db = tmp_path / "undertone.db"
+    path = tmp_path / "fingerprints.json"
+    path.write_text(
+        json.dumps(
+            {
+                "fingerprints": [
+                    {"fingerprint_id": "VP-active", "embedding": [1.0, 0.0]},
+                    {
+                        "fingerprint_id": "VP-discarded",
+                        "embedding": [0.0, 1.0],
+                        "status": "discarded",
+                        "discard_reason": "bad print",
+                    },
+                ]
+            }
+        )
+    )
+    assert main(["--db", str(db), "fingerprint-import", str(path), "--yes"]) == 0
+    capsys.readouterr()
+
+    assert main(["--db", str(db), "stats", "--json"]) == 0
+    stats = json.loads(capsys.readouterr().out)
+    assert stats["fingerprint_status"]["active"] == 1
+    assert stats["fingerprint_status"]["discarded"] == 1
+    assert stats["fingerprint_models"]["legacy"] == 1
+
+    assert main(["--db", str(db), "models", "--json"]) == 0
+    models = json.loads(capsys.readouterr().out)
+    assert models["fingerprint_status"]["active"] == 1
+    assert models["fingerprint_status"]["discarded"] == 1
+    assert models["fingerprint_models"]["legacy"] == 1
+
+    assert main(["--db", str(db), "doctor", "--json"]) == 1
+    doctor = json.loads(capsys.readouterr().out)
+    status_check = next(check for check in doctor["checks"] if check["name"] == "fingerprint_status")
+    assert status_check["active"] == 1
+    assert status_check["discarded"] == 1
+    model_check = next(check for check in doctor["checks"] if check["name"] == "fingerprint_models")
+    assert model_check["legacy"] == 1
+
+
+def test_discarded_legacy_fingerprint_does_not_fail_model_compatibility(tmp_path, capsys, monkeypatch):
+    class FakeEngine:
+        cli_path = "/tmp/fluidaudiocli"
+
+        async def healthcheck(self):
+            return True
+
+    monkeypatch.setattr(
+        "undertone_audio.commands.ops.create_engine", lambda name, config: FakeEngine()
+    )
+    db = tmp_path / "undertone.db"
+    path = tmp_path / "fingerprints.json"
+    path.write_text(
+        json.dumps(
+            {
+                "fingerprints": [
+                    {
+                        "fingerprint_id": "VP-discarded",
+                        "embedding": [0.0, 1.0],
+                        "status": "discarded",
+                        "discard_reason": "bad print",
+                    },
+                ]
+            }
+        )
+    )
+    assert main(["--db", str(db), "fingerprint-import", str(path), "--yes"]) == 0
+    capsys.readouterr()
+
+    assert main(["--db", str(db), "doctor", "--json"]) == 0
+    doctor = json.loads(capsys.readouterr().out)
+    model_check = next(check for check in doctor["checks"] if check["name"] == "fingerprint_models")
+    status_check = next(check for check in doctor["checks"] if check["name"] == "fingerprint_status")
+    assert model_check["legacy"] == 0
+    assert status_check["discarded"] == 1
+
+
 def test_fingerprint_import_dry_run_validates_rows(tmp_path, capsys):
     bad = tmp_path / "bad-fingerprints.json"
     bad.write_text(json.dumps({"fingerprints": [{"fingerprint_id": "VP-bad"}]}))
@@ -1677,6 +1968,7 @@ def test_cli_doctor_reports_checks(tmp_path, monkeypatch, capsys):
         "db_writable",
         "engine",
         "fingerprint_models",
+        "fingerprint_status",
         "yt_dlp",
     }
     assert {source["source"] for source in payload["sources"]} == {

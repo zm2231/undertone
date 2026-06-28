@@ -21,6 +21,12 @@ def register(subcommands: argparse._SubParsersAction) -> None:
     fingerprints = subcommands.add_parser("fingerprints", help="List voice fingerprints.")
     fingerprints.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     fingerprints.add_argument("--format", choices=["text", "json"], default="text")
+    fingerprints.add_argument(
+        "--status",
+        choices=["active", "discarded", "all"],
+        default="active",
+        help="Filter by fingerprint status. Default: active.",
+    )
     fingerprints.add_argument("--unnamed", action="store_true", help="Only show fingerprints without labels.")
     fingerprints.add_argument("--excerpts", action="store_true", help="Show sample transcript lines.")
     fingerprints.add_argument("--limit-excerpts", type=int, default=3)
@@ -82,6 +88,28 @@ def register(subcommands: argparse._SubParsersAction) -> None:
     adopt.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     adopt.set_defaults(func=fingerprint_adopt_model_cmd)
 
+    discard = subcommands.add_parser("fingerprint-discard", help="Retire a bad voice fingerprint.")
+    discard.add_argument("fingerprint_id")
+    discard.add_argument("--reason", required=True, help="Why this fingerprint is being discarded.")
+    discard.add_argument("--dry-run", action="store_true", help="Print the discard plan without writing.")
+    discard.add_argument("--yes", action="store_true", help="Confirm writes.")
+    discard.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    discard.set_defaults(func=fingerprint_discard_cmd)
+
+    restore = subcommands.add_parser("fingerprint-restore", help="Restore a discarded voice fingerprint.")
+    restore.add_argument("fingerprint_id")
+    restore.add_argument("--dry-run", action="store_true", help="Print the restore plan without writing.")
+    restore.add_argument("--yes", action="store_true", help="Confirm writes.")
+    restore.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    restore.set_defaults(func=fingerprint_restore_cmd)
+
+    destroy = subcommands.add_parser("fingerprint-destroy", help="Permanently delete a voice fingerprint.")
+    destroy.add_argument("fingerprint_id")
+    destroy.add_argument("--dry-run", action="store_true", help="Print the delete plan without writing.")
+    destroy.add_argument("--yes", action="store_true", help="Confirm deletion.")
+    destroy.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    destroy.set_defaults(func=fingerprint_destroy_cmd)
+
 
 def fingerprints_cmd(args: argparse.Namespace) -> int:
     config = config_for_args(args)
@@ -93,10 +121,12 @@ def fingerprints_cmd(args: argparse.Namespace) -> int:
                 "display_name": display_name,
                 "sample_count": count,
                 "embedding_model": embedding_model,
+                "status": status,
+                "discard_reason": discard_reason,
             }
-            for fingerprint_id, display_name, count, embedding_model in SpeakerFingerprintStore(
+            for fingerprint_id, display_name, count, embedding_model, status, discard_reason in SpeakerFingerprintStore(
                 config.db_path
-            ).list_all()
+            ).list_all(status=args.status)
             if not args.unnamed or not display_name
         ]
         excerpts = (
@@ -195,6 +225,68 @@ def fingerprint_import_cmd(args: argparse.Namespace) -> int:
                 plan["backup_path"] = str(backup)
             else:
                 plan["dry_run"] = False
+    _print_plan(plan, args.json)
+    return 0
+
+
+def fingerprint_discard_cmd(args: argparse.Namespace) -> int:
+    if not args.dry_run and not args.yes:
+        raise ValueError("fingerprint-discard requires --yes or --dry-run")
+    config = config_for_args(args)
+    with _open_fingerprint_store(config.db_path, dry_run=args.dry_run) as store:
+        if args.dry_run:
+            plan = store.fingerprint_action_plan(
+                args.fingerprint_id,
+                action="discard",
+                reason=args.reason,
+            )
+        else:
+            plan = store.fingerprint_action_plan(
+                args.fingerprint_id,
+                action="discard",
+                reason=args.reason,
+            )
+            if plan["will_write"]:
+                backup = _backup_db(config.db_path)
+                plan = store.discard_fingerprint(args.fingerprint_id, args.reason)
+                plan["backup_path"] = str(backup)
+            else:
+                plan["dry_run"] = False
+    _print_plan(plan, args.json)
+    return 0
+
+
+def fingerprint_restore_cmd(args: argparse.Namespace) -> int:
+    if not args.dry_run and not args.yes:
+        raise ValueError("fingerprint-restore requires --yes or --dry-run")
+    config = config_for_args(args)
+    with _open_fingerprint_store(config.db_path, dry_run=args.dry_run) as store:
+        if args.dry_run:
+            plan = store.fingerprint_action_plan(args.fingerprint_id, action="restore")
+        else:
+            plan = store.fingerprint_action_plan(args.fingerprint_id, action="restore")
+            if plan["will_write"]:
+                backup = _backup_db(config.db_path)
+                plan = store.restore_fingerprint(args.fingerprint_id)
+                plan["backup_path"] = str(backup)
+            else:
+                plan["dry_run"] = False
+    _print_plan(plan, args.json)
+    return 0
+
+
+def fingerprint_destroy_cmd(args: argparse.Namespace) -> int:
+    if not args.dry_run and not args.yes:
+        raise ValueError("fingerprint-destroy requires --yes or --dry-run")
+    config = config_for_args(args)
+    with _open_fingerprint_store(config.db_path, dry_run=args.dry_run) as store:
+        if args.dry_run:
+            plan = store.fingerprint_action_plan(args.fingerprint_id, action="destroy")
+        else:
+            store.fingerprint_action_plan(args.fingerprint_id, action="destroy")
+            backup = _backup_db(config.db_path)
+            plan = store.destroy_fingerprint(args.fingerprint_id)
+            plan["backup_path"] = str(backup)
     _print_plan(plan, args.json)
     return 0
 
@@ -302,8 +394,11 @@ def _render_fingerprints(rows: list[dict], excerpts: dict[str, list[dict]]) -> s
         name = row["display_name"] or "(unnamed)"
         model = row["embedding_model"] or "(legacy model unknown)"
         lines.append(
-            f"  {row['fingerprint_id']}  {name}  samples={row['sample_count']}  model={model}"
+            f"  {row['fingerprint_id']}  {name}  samples={row['sample_count']}  "
+            f"status={row['status']}  model={model}"
         )
+        if row.get("discard_reason"):
+            lines.append(f"    reason: {row['discard_reason']}")
         for excerpt in excerpts.get(row["fingerprint_id"], []):
             ts = _timestamp(excerpt["start_ms"])
             text = excerpt["text"].replace("\n", " ")

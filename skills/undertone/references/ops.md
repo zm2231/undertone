@@ -44,14 +44,15 @@ undertone --db ./undertone.db stats
 undertone --db ./undertone.db fingerprints
 undertone --db ./undertone.db fingerprints --format json
 undertone --db ./undertone.db fingerprints --unnamed --excerpts
+undertone --db ./undertone.db fingerprints --status all
 undertone schema transcript
 undertone schema connector-asset
 undertone connector-list
 undertone --db ./undertone.db search "follow up"
 ```
 
-`models` should show the effective ASR, diarization, VAD, embedding, pyannote, fingerprint, threshold selections, and fingerprint model compatibility counts.
-`doctor` checks DB writability, voice fingerprint model compatibility, engine health, optional source readiness, and pyannote dependency import when `--check-pyannote` or `--all` is passed. The pyannote check does not download or load a gated Hugging Face model; model access is verified when the backend runs. Optional source commands are always visible; there is no per-source enable switch. Sources become ready when their dependency, credentials, or local data is present.
+`models` should show the effective ASR, diarization, VAD, embedding, pyannote, fingerprint, threshold selections, fingerprint model compatibility counts, and active/discarded fingerprint status counts.
+`doctor` checks DB writability, voice fingerprint model compatibility, fingerprint status counts, engine health, optional source readiness, and pyannote dependency import when `--check-pyannote` or `--all` is passed. The pyannote check does not download or load a gated Hugging Face model; model access is verified when the backend runs. Optional source commands are always visible; there is no per-source enable switch. Sources become ready when their dependency, credentials, or local data is present.
 Runtime inspection commands are human-readable by default. For agents and scripts, add `--json` for machine-readable output.
 
 External binaries are bounded by `UNDERTONE_PROCESS_TIMEOUT_SECONDS` or ingest command `--process-timeout-seconds`. The default is `7200`; use `0` only when intentionally disabling subprocess timeouts.
@@ -67,7 +68,7 @@ undertone --db ./undertone.db delete meeting-1 --yes
 
 `reenrich` rebuilds enrichment from the saved `RawTranscript` without retranscribing audio; use it after changing thresholds or feature toggles. `relabel` re-stamps saved speaker display names from the fingerprint DB without ASR or enrichment. `delete` removes a saved transcript and requires `--yes` to proceed.
 
-For speaker fingerprint operations (label, relabel, list/excerpts, export/import, merge, and embedding-model adoption), see `references/fingerprints.md`. For version upgrades and cross-DB fingerprint portability, see `references/upgrades.md`.
+For speaker fingerprint operations (label, relabel, list/excerpts, discard/restore/destroy, export/import, merge, and embedding-model adoption), see `references/fingerprints.md`. For version upgrades and cross-DB fingerprint portability, see `references/upgrades.md`.
 
 Ingest commands (`run-wav`, `finalize-json`, connectors, meeting sources) fail on a duplicate transcript id rather than overwriting. Pass `--force` to overwrite or `--skip-existing` to no-op.
 

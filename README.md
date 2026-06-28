@@ -153,6 +153,7 @@ List persisted speaker fingerprints:
 undertone --db ./undertone.db fingerprints
 undertone --db ./undertone.db fingerprints --format json
 undertone --db ./undertone.db fingerprints --unnamed --excerpts
+undertone --db ./undertone.db fingerprints --status all
 undertone --db ./undertone.db fingerprint-label VP-abc123 "Speaker Name"
 undertone --db ./undertone.db relabel --all
 undertone --db ./undertone.db fingerprint-adopt-model --dry-run
@@ -192,11 +193,19 @@ undertone --db ./undertone.db fingerprint-adopt-model --dry-run
 undertone --db ./undertone.db fingerprint-adopt-model --yes
 undertone --db ./undertone.db fingerprint-merge VP-old VP-canonical --dry-run
 undertone --db ./undertone.db fingerprint-merge VP-old VP-canonical --yes
+undertone --db ./undertone.db fingerprint-discard VP-bad --reason "mixed speaker" --dry-run
+undertone --db ./undertone.db fingerprint-discard VP-bad --reason "mixed speaker" --yes
+undertone --db ./undertone.db fingerprint-restore VP-bad --dry-run
+undertone --db ./undertone.db fingerprint-restore VP-bad --yes
+undertone --db ./undertone.db fingerprint-destroy VP-bad --dry-run
+undertone --db ./undertone.db fingerprint-destroy VP-bad --yes
 undertone --db ./undertone.db stats
 undertone --db ./undertone.db delete meeting-1 --yes
 ```
 
-Fingerprint import, merge, and model adoption are explicit write operations. Use `--dry-run` first; writes require `--yes`. Before a merge, import, or adoption write, Undertone creates a timestamped `.bak` copy beside the SQLite DB.
+Fingerprint import, merge, model adoption, discard, restore, and destroy are explicit write operations. Use `--dry-run` first; writes require `--yes`. Before a mutating write, Undertone creates a timestamped `.bak` copy beside the SQLite DB.
+
+Discard is the reversible corrective action for a bad voiceprint. A discarded print is hidden from normal `fingerprints` output, ignored by future matching, and visible with `fingerprints --status discarded` or `--status all`. Restore makes it matchable again. Destroy permanently deletes the fingerprint row and cascades its fingerprint-source rows; saved transcript speaker rows keep their historical fingerprint id.
 
 Speaker fingerprints are namespaced by the embedding model that produced their vectors. Changing `UNDERTONE_EMBEDDING_MODEL` or switching to the pyannote backend does not compare new embeddings against old model spaces. Legacy fingerprints from older Undertone DBs are dormant until explicitly adopted:
 

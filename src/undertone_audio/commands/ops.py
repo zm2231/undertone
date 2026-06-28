@@ -78,6 +78,7 @@ def models_cmd(args: argparse.Namespace) -> int:
         fingerprint_models = store.fingerprint_model_counts(
             effective_fingerprint_embedding_model(config)
         )
+        fingerprint_status = store.fingerprint_status_counts()
     finally:
         store.close()
     payload = {
@@ -90,6 +91,7 @@ def models_cmd(args: argparse.Namespace) -> int:
         "pyannote_device": config.pyannote_device,
         "fingerprint_backend": config.fingerprint_backend,
         "fingerprint_models": fingerprint_models,
+        "fingerprint_status": fingerprint_status,
         "voice_metrics": config.voice_metrics,
         "output_format": config.default_output_format,
         "output_detail": config.default_output_detail,
@@ -188,6 +190,7 @@ def doctor_cmd(args: argparse.Namespace) -> int:
             fingerprint_models = store.fingerprint_model_counts(
                 effective_fingerprint_embedding_model(config)
             )
+            fingerprint_status = store.fingerprint_status_counts()
         finally:
             store.close()
         checks.append(
@@ -199,6 +202,13 @@ def doctor_cmd(args: argparse.Namespace) -> int:
                 "fix": "Run `undertone fingerprint-adopt-model --dry-run` then `--yes` for legacy rows."
                 if fingerprint_models["legacy"] or fingerprint_models["incompatible"]
                 else None,
+            }
+        )
+        checks.append(
+            {
+                "name": "fingerprint_status",
+                "ok": True,
+                **fingerprint_status,
             }
         )
         ok = ok and fingerprint_models["legacy"] == 0 and fingerprint_models["incompatible"] == 0
@@ -288,6 +298,8 @@ def _render_models(payload: dict) -> str:
         f"  fingerprint models:  compatible={payload['fingerprint_models']['compatible']} "
         f"legacy={payload['fingerprint_models']['legacy']} "
         f"incompatible={payload['fingerprint_models']['incompatible']}",
+        f"  fingerprint status:  active={payload['fingerprint_status']['active']} "
+        f"discarded={payload['fingerprint_status']['discarded']}",
         f"  voice metrics:       {payload['voice_metrics']}",
         f"  process timeout:     {payload['process_timeout_seconds']}s",
         f"  default output:      {payload['output_format']} ({payload['output_detail']})",
@@ -312,6 +324,8 @@ def _render_stats(payload: dict) -> str:
             f"  speakers:      {payload['speaker_count']}",
             f"  segments:      {payload['segment_count']}",
             f"  fingerprints:  {payload['fingerprint_count']}",
+            f"    active:      {payload['fingerprint_status']['active']}",
+            f"    discarded:   {payload['fingerprint_status']['discarded']}",
             f"    compatible:  {payload['fingerprint_models']['compatible']}",
             f"    legacy:      {payload['fingerprint_models']['legacy']}",
             f"    incompatible:{payload['fingerprint_models']['incompatible']}",
@@ -352,6 +366,9 @@ def _check_detail(check: dict) -> str:
         "device",
         "project",
         "state",
+        "active",
+        "discarded",
+        "total",
         "detail",
         "error",
         "fix",

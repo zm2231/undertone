@@ -1,6 +1,6 @@
 ---
 name: undertone
-description: Operate undertone, a local on-device audio transcript producer. Use when ingesting audio from local files, YouTube, podcasts, RSS feeds, direct media URLs, Quill, or Google Meet; running transcription, diarization, or FluidAudio/pyannote engine selection; producing, re-enriching, browsing, searching, or exporting transcripts; labeling, relabeling, merging, exporting, or adopting speaker voice fingerprints; running doctor, stats, models, or webhook checks; installing, packaging, or upgrading undertone. Routes to detailed references under references/.
+description: Operate undertone, a local on-device audio transcript producer. Use when ingesting audio from local files, YouTube, podcasts, RSS feeds, direct media URLs, Quill, or Google Meet; running transcription, diarization, or FluidAudio/pyannote engine selection; producing, re-enriching, browsing, searching, or exporting transcripts; labeling, relabeling, merging, discarding, restoring, destroying, exporting, or adopting speaker voice fingerprints; running doctor, stats, models, or webhook checks; installing, packaging, or upgrading undertone. Routes to detailed references under references/.
 ---
 
 # Undertone
@@ -15,7 +15,7 @@ Undertone is a self-contained, on-device producer of audio transcripts: it downl
 | YouTube, podcasts, RSS feeds, direct media URLs; connector plugins and download paths | `references/connectors.md` |
 | Quill or Google Meet meeting recordings; source precedence; multi-account auth; text fallback | `references/meetings.md` |
 | Load, search, export formats (json/raw-json/text/md/jsonl/csv) and detail levels | `references/exports.md` |
-| Speaker fingerprints: label, relabel, merge, export/import, embedding-model adoption, over-segmentation | `references/fingerprints.md` |
+| Speaker fingerprints: label, relabel, discard/restore/destroy, merge, export/import, embedding-model adoption, over-segmentation | `references/fingerprints.md` |
 | Install, doctor, models, stats, health, packaging, self-contained boundary checks | `references/ops.md` |
 | Version upgrades, automatic schema migration, fingerprint model namespace, cross-DB library portability | `references/upgrades.md` |
 
@@ -23,7 +23,7 @@ Undertone is a self-contained, on-device producer of audio transcripts: it downl
 
 - `undertone` must stay self-contained; do not import a host application's internal packages.
 - When audio exists, rerun Undertone local ASR, diarization, embeddings, fingerprinting, and enrichment. Source-provided transcript text, speaker IDs, and diarization are fallback or provenance only.
-- Identity-changing fingerprint operations (import, merge, adopt-model) require `--dry-run` first, then `--yes` with a timestamped `.bak`.
+- Identity-changing fingerprint operations (import, merge, adopt-model, discard, restore, destroy) require `--dry-run` first, then `--yes` with a timestamped `.bak` when a write occurs.
 
 ## Common Commands
 
