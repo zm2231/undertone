@@ -72,7 +72,7 @@ undertone --db ./undertone.db delete meeting-1 --yes
 
 For speaker fingerprint operations (label, relabel, list/excerpts, discard/restore/destroy, export/import, merge, and embedding-model adoption), see `references/fingerprints.md`. For version upgrades and cross-DB fingerprint portability, see `references/upgrades.md`.
 
-Ingest commands (`run-wav`, `finalize-json`, connectors, meeting sources) fail on a duplicate transcript id rather than overwriting. Pass `--force` to overwrite or `--skip-existing` to no-op.
+Ingest commands (`run-wav`, `finalize-json`, connectors, meeting sources) fail on a duplicate transcript id rather than overwriting. Pass `--force` to overwrite or `--skip-existing` to no-op. Matching audio across different source ids skips before fingerprint assignment when Chromaprint `fpcalc` is installed; pass `--allow-duplicate` only for intentional duplicate audio storage. Text simhash is stored as advisory metadata. `doctor --check-fpcalc` reports the Chromaprint pre-ASR dedupe gate.
 
 ## Verification
 

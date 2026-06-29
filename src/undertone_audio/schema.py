@@ -139,6 +139,10 @@ class TranscriptMetadata(BaseModel):
     fingerprint_backend: str | None = None
     model_versions: dict = Field(default_factory=dict)
     audio_format: dict = Field(default_factory=dict)
+    content_text_simhash: str | None = None
+    content_text_simhash_algorithm: str | None = None
+    content_audio_fp: str | None = None
+    content_audio_fp_algorithm: str | None = None
     expected_speaker_count: int | None = None
     expected_speaker_source: str | None = None
     source_metadata: dict = Field(default_factory=dict)

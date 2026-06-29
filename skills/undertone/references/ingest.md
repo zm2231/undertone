@@ -36,6 +36,12 @@ undertone --db ./undertone.db finalize-json raw-transcript.json \
 
 `run-wav` and `finalize-json` fail with a nonzero exit instead of silently overwriting an existing transcript id. Pass `--force` to overwrite the existing transcript, or `--skip-existing` to no-op when the target id already exists. The same guard applies to every ingest path, including connectors and meeting sources.
 
+## Content Dedupe
+
+When Chromaprint `fpcalc` is installed, every audio ingest path checks for matching audio across different source ids before ASR and before speaker fingerprints update. A duplicate returns a normal skip payload with `existing_transcript_id`, `match_type=audio`, `algorithm`, and `distance`; pass `--allow-duplicate` only when storing matching audio twice is intentional.
+
+Undertone also stores and backfills normalized-text simhashes for diagnostics and later review surfaces. Text similarity alone is advisory and must not silently skip an ingest because same-topic recordings can collide.
+
 ## Progress Events
 
 Use `--progress json` for queue integrations. Progress events are JSONL on stderr; transcript JSON/stdout stays clean.

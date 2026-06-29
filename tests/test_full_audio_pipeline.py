@@ -71,6 +71,100 @@ def test_full_audio_enrichment_without_voice_dependency(tmp_path):
     assert metrics["S1"].interruptions_received == 1
 
 
+def test_text_signature_does_not_hard_skip_before_fingerprint_assignment(tmp_path):
+    db = tmp_path / "undertone.db"
+    store = TranscriptStore(db)
+    try:
+        pipeline = AudioPipeline(
+            store=store,
+            config=Config(
+                db_path=db,
+                webhook_enabled=False,
+                voice_metrics="off",
+                min_talk_seconds=0,
+            ),
+        )
+        first = pipeline.finalize_raw(_raw(), transcript_id="source-a")
+        second = pipeline.finalize_raw(_raw(), transcript_id="source-b")
+
+        assert store.exists("source-b") is True
+        assert second.metadata.content_text_simhash == first.metadata.content_text_simhash
+        assert first.metadata.content_text_simhash is not None
+        assert first.metadata.content_text_simhash_algorithm == "simhash64-token-word4-v1"
+    finally:
+        store.close()
+
+
+def test_content_dedupe_can_be_explicitly_bypassed(tmp_path):
+    db = tmp_path / "undertone.db"
+    store = TranscriptStore(db)
+    try:
+        pipeline = AudioPipeline(
+            store=store,
+            config=Config(
+                db_path=db,
+                webhook_enabled=False,
+                voice_metrics="off",
+                min_talk_seconds=0,
+            ),
+        )
+        first = pipeline.finalize_raw(_raw(), transcript_id="source-a")
+        second = pipeline.finalize_raw(_raw(), transcript_id="source-b", allow_duplicate=True)
+
+        assert store.exists("source-a")
+        assert store.exists("source-b")
+        assert second.metadata.content_text_simhash == first.metadata.content_text_simhash
+    finally:
+        store.close()
+
+
+def test_legacy_transcript_text_signature_backfill_is_advisory(tmp_path):
+    db = tmp_path / "undertone.db"
+    store = TranscriptStore(db)
+    try:
+        pipeline = AudioPipeline(
+            store=store,
+            config=Config(
+                db_path=db,
+                webhook_enabled=False,
+                voice_metrics="off",
+                min_talk_seconds=0,
+            ),
+        )
+        pipeline.finalize_raw(_raw(), transcript_id="legacy-source")
+        store._conn.execute(
+            """UPDATE transcripts
+               SET content_text_simhash = NULL,
+                   content_text_simhash_algorithm = NULL
+               WHERE transcript_id = ?""",
+            ("legacy-source",),
+        )
+        store._conn.commit()
+    finally:
+        store.close()
+
+    store = TranscriptStore(db)
+    try:
+        legacy = store.load("legacy-source")
+        assert legacy.metadata.content_text_simhash is not None
+
+        pipeline = AudioPipeline(
+            store=store,
+            config=Config(
+                db_path=db,
+                webhook_enabled=False,
+                voice_metrics="off",
+                min_talk_seconds=0,
+            ),
+        )
+        new_transcript = pipeline.finalize_raw(_raw(), transcript_id="new-source")
+
+        assert store.exists("new-source") is True
+        assert new_transcript.metadata.content_text_simhash == legacy.metadata.content_text_simhash
+    finally:
+        store.close()
+
+
 def test_required_voice_metrics_surfaces_missing_dependency(tmp_path, monkeypatch):
     def missing_import(name, *args, **kwargs):
         if name == "parselmouth":

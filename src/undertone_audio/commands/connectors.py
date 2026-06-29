@@ -11,7 +11,9 @@ from urllib.parse import urlparse
 from undertone_audio.commands.common import (
     add_audio_pipeline_flags,
     add_duplicate_flags,
+    audio_content_signature,
     config_for_args,
+    emit_duplicate_skip,
     emit_progress,
     emit_transcript,
     guard_existing_transcript,
@@ -31,6 +33,7 @@ from undertone_audio.connectors.base import redact_url_values
 from undertone_audio.connectors.podcast import _looks_like_audio_url, _stable_id as _podcast_stable_id
 from undertone_audio.connectors.web import select_candidate
 from undertone_audio.connectors.youtube import _video_id_hint
+from undertone_audio.dedupe import DuplicateTranscriptError
 from undertone_audio.engines import create_engine
 from undertone_audio.pipeline import AudioPipeline, _audio_format
 from undertone_audio.storage import TranscriptStore
@@ -298,6 +301,13 @@ def _ingest_asset(
         if guard_existing_transcript(store, transcript_id, args):
             emit_progress(args, "skipped", transcript_id=transcript_id, reason="exists")
             return 0
+        audio_signature = audio_content_signature(
+            store,
+            args,
+            config,
+            asset.audio_path,
+            transcript_id=transcript_id,
+        )
         engine = create_engine(args.engine, config)
         emit_progress(
             args,
@@ -335,10 +345,15 @@ def _ingest_asset(
             expected_speaker_source=args.expected_speaker_source,
             audio_format=_audio_format(asset.audio_path),
             audio_path=asset.audio_path,
+            allow_duplicate=args.allow_duplicate,
+            content_audio_fp=audio_signature.value if audio_signature else None,
+            content_audio_fp_algorithm=audio_signature.algorithm if audio_signature else None,
         )
         emit_progress(args, "saved", transcript_id=transcript.transcript_id)
         emit_transcript(transcript, args, raw=raw)
         return 0
+    except DuplicateTranscriptError as exc:
+        return emit_duplicate_skip(args, exc)
     finally:
         store.close()
 

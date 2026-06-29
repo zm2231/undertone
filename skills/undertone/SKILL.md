@@ -43,7 +43,7 @@ undertone --db ./undertone.db stats
 undertone --db ./undertone.db doctor --all
 ```
 
-Browse and status commands are human-readable by default; add `--json` for agents and scripts. Transcript exports use `--output-format md|text|json|jsonl|csv|raw-json` and `--output-detail minimal|standard|full`. Ingest commands fail on a duplicate transcript id rather than overwriting; pass `--force` to overwrite or `--skip-existing` to no-op.
+Browse and status commands are human-readable by default; add `--json` for agents and scripts. Transcript exports use `--output-format md|text|json|jsonl|csv|raw-json` and `--output-detail minimal|standard|full`. Ingest commands fail on a duplicate transcript id rather than overwriting; pass `--force` to overwrite or `--skip-existing` to no-op. Matching audio across different source ids is skipped before fingerprint assignment when Chromaprint `fpcalc` is installed; text simhash is advisory metadata, not a silent skip gate.
 
 ## Verification
 

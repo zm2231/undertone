@@ -1,14 +1,17 @@
 import json
 import sqlite3
+from types import SimpleNamespace
 from pathlib import Path
 
 from undertone_audio.cli import main
+from undertone_audio.dedupe import AudioSignature
 from undertone_audio.engines.base import RawTranscript
-from undertone_audio.schema import Segment, Speaker
+from undertone_audio.schema import EnrichedTranscript, Segment, Speaker, TranscriptMetadata
 from undertone_audio.sources.meet import MEET_ADC_COMMAND
 from undertone_audio.sources.meet import MeetSource
 from undertone_audio.sources.meet import download_recording_mp4
 from undertone_audio.sources.quill import QuillSource
+from undertone_audio.storage import TranscriptStore
 
 
 class FakePreprocessor:
@@ -47,6 +50,34 @@ def _quill_db(path):
                (id, manualTitle, eventTitle, title, llmTitle, word_count, start)
                VALUES ('m1', 'Manual', NULL, 'Title', 'LLM', 42, 2)"""
         )
+
+
+def _seed_audio_duplicate(db_path, *, transcript_id="existing-audio", fingerprint="audio-fp"):
+    store = TranscriptStore(db_path)
+    try:
+        store.save(
+            EnrichedTranscript(
+                transcript_id=transcript_id,
+                metadata=TranscriptMetadata(
+                    duration_ms=1000,
+                    engine="fixture",
+                    content_audio_fp=fingerprint,
+                    content_audio_fp_algorithm="chromaprint-fpcalc-v1",
+                ),
+                speakers=[Speaker(speaker_id="S1")],
+                segments=[
+                    Segment(
+                        segment_id="s1",
+                        speaker_id="S1",
+                        start_ms=0,
+                        end_ms=1000,
+                        text="existing audio",
+                    )
+                ],
+            )
+        )
+    finally:
+        store.close()
 
 
 def test_quill_source_prefers_combined_audio_without_loading_transcript(tmp_path):
@@ -488,6 +519,113 @@ def test_quill_ingest_duplicate_refused_before_engine_construction(tmp_path, mon
     assert "already exists" in capsys.readouterr().err
 
 
+def test_quill_ingest_audio_duplicate_skips_before_engine_construction(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    db = tmp_path / "z.db"
+    _seed_audio_duplicate(db)
+    quill_db = tmp_path / "quill.db"
+    meetings = tmp_path / "meetings"
+    folder = meetings / "123-m1"
+    folder.mkdir(parents=True)
+    audio_path = folder / "m1-FINAL-1000.000000-1010.000000-combined.m4a"
+    audio_path.write_bytes(b"audio")
+    _quill_db(quill_db)
+    monkeypatch.setattr(
+        "undertone_audio.commands.sources.AudioPreprocessor",
+        lambda process_timeout_seconds=None: FakePreprocessor(),
+    )
+    monkeypatch.setattr(
+        "undertone_audio.commands.common.audio_signature_for_path",
+        lambda path, timeout_seconds: AudioSignature("audio-fp"),
+    )
+
+    def boom(name, config):
+        raise RuntimeError("engine should not be constructed")
+
+    monkeypatch.setattr("undertone_audio.commands.sources.create_engine", boom)
+
+    assert (
+        main(
+            [
+                "--db",
+                str(db),
+                "quill-ingest",
+                "m1",
+                "--quill-db",
+                str(quill_db),
+                "--meetings-dir",
+                str(meetings),
+                "--json",
+            ]
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    payload = json.loads(captured.err)
+    assert payload["ingested"] == 0
+    assert payload["skipped"][0]["meeting_id"] == "m1"
+    assert payload["skipped"][0]["existing_transcript_id"] == "existing-audio"
+    assert payload["skipped"][0]["match_type"] == "audio"
+
+
+def test_quill_ingest_audio_duplicate_progress_json_stays_event_stream(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    db = tmp_path / "z.db"
+    _seed_audio_duplicate(db)
+    quill_db = tmp_path / "quill.db"
+    meetings = tmp_path / "meetings"
+    folder = meetings / "123-m1"
+    folder.mkdir(parents=True)
+    audio_path = folder / "m1-FINAL-1000.000000-1010.000000-combined.m4a"
+    audio_path.write_bytes(b"audio")
+    _quill_db(quill_db)
+    monkeypatch.setattr(
+        "undertone_audio.commands.sources.AudioPreprocessor",
+        lambda process_timeout_seconds=None: FakePreprocessor(),
+    )
+    monkeypatch.setattr(
+        "undertone_audio.commands.common.audio_signature_for_path",
+        lambda path, timeout_seconds: AudioSignature("audio-fp"),
+    )
+
+    def boom(name, config):
+        raise RuntimeError("engine should not be constructed")
+
+    monkeypatch.setattr("undertone_audio.commands.sources.create_engine", boom)
+
+    assert (
+        main(
+            [
+                "--db",
+                str(db),
+                "quill-ingest",
+                "m1",
+                "--quill-db",
+                str(quill_db),
+                "--meetings-dir",
+                str(meetings),
+                "--json",
+                "--progress",
+                "json",
+            ]
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    events = [json.loads(line) for line in captured.err.splitlines()]
+    assert [event["event"] for event in events] == ["start", "skipped"]
+    assert all("event" in event for event in events)
+    assert events[1]["existing_transcript_id"] == "existing-audio"
+
+
 def test_quill_ingest_skip_existing_does_not_construct_source_for_explicit_meeting(
     tmp_path,
     monkeypatch,
@@ -604,6 +742,58 @@ def test_meet_ingest_skip_existing_does_not_select_source(tmp_path, monkeypatch,
 
     assert main(["--db", str(db), "meet-ingest", conference_record, "--skip-existing"]) == 0
     assert json.loads(capsys.readouterr().out)["skipped"] is True
+
+
+def test_meet_ingest_audio_duplicate_skips_before_engine_construction(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    db = tmp_path / "z.db"
+    _seed_audio_duplicate(db)
+    audio_path = tmp_path / "meet.mp4"
+    audio_path.write_bytes(b"audio")
+
+    class FakeMeetSource:
+        def __init__(self, **kwargs):
+            pass
+
+        def select(self, conference_record, local_audio=None, allow_text_fallback=True):
+            return SimpleNamespace(
+                audio_path=audio_path,
+                source_kind="local-audio",
+                source_metadata={"source": "meet"},
+                raw_fallback=None,
+            )
+
+    monkeypatch.setattr("undertone_audio.commands.sources.MeetSource", FakeMeetSource)
+    monkeypatch.setattr(
+        "undertone_audio.commands.common.audio_signature_for_path",
+        lambda path, timeout_seconds: AudioSignature("audio-fp"),
+    )
+
+    def boom(name, config):
+        raise RuntimeError("engine should not be constructed")
+
+    monkeypatch.setattr("undertone_audio.commands.sources.create_engine", boom)
+
+    assert (
+        main(
+            [
+                "--db",
+                str(db),
+                "meet-ingest",
+                "conferenceRecords/abc",
+                "--transcript-id",
+                "new-meet",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["transcript_id"] == "new-meet"
+    assert payload["existing_transcript_id"] == "existing-audio"
+    assert payload["match_type"] == "audio"
 
 
 def test_meet_auth_fix_names_scoped_gcloud_command():

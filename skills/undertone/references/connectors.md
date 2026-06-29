@@ -100,6 +100,8 @@ Podcast feeds are selected by zero-based `--episode` index or first title match.
 
 Connector ingest fails on a duplicate transcript id rather than overwriting. Pass `--force` to overwrite or `--skip-existing` to no-op.
 
+Connector ingest also participates in content dedupe when Chromaprint `fpcalc` is installed. If the same audio has already been saved from another source id, Undertone skips before ASR and before speaker fingerprints update, then reports the existing transcript id. Text simhash is stored as advisory metadata, not used for silent skips.
+
 ## Quality Rule
 
 Connectors should not use captions, feed notes, or external speaker labels as the transcript population path when audio is available. Download audio, then run Undertone local ASR, diarization, embeddings, fingerprinting, and enrichment.

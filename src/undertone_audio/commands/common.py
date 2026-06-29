@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from undertone_audio.config import Config, load as load_config
+from undertone_audio.dedupe import DuplicateTranscriptError, audio_signature_for_path
 from undertone_audio.engines.base import RawTranscript
 from undertone_audio.export import (
     OUTPUT_DETAIL_LEVELS,
@@ -59,6 +60,11 @@ def add_duplicate_flags(parser: argparse.ArgumentParser) -> None:
         "--skip-existing",
         action="store_true",
         help="Skip ingest when the target transcript id already exists.",
+    )
+    parser.add_argument(
+        "--allow-duplicate",
+        action="store_true",
+        help="Allow content-duplicate ingest. By default duplicate content is skipped before fingerprints update.",
     )
 
 
@@ -146,6 +152,49 @@ def guard_existing_transcript(
     if getattr(args, "force", False):
         return False
     raise ValueError(f"transcript already exists: {transcript_id}; pass --force or --skip-existing")
+
+
+def audio_content_signature(
+    store,
+    args: argparse.Namespace,
+    config: Config,
+    audio_path: Path,
+    *,
+    transcript_id: str | None,
+):
+    signature = audio_signature_for_path(
+        Path(audio_path),
+        timeout_seconds=config.process_timeout_seconds,
+    )
+    if signature is None:
+        return None
+    if not getattr(args, "allow_duplicate", False):
+        duplicate = store.find_audio_duplicate(
+            signature.value,
+            signature.algorithm,
+            exclude_transcript_id=transcript_id,
+        )
+        if duplicate is not None:
+            raise DuplicateTranscriptError(transcript_id or "", duplicate)
+    return signature
+
+
+def emit_duplicate_skip(args: argparse.Namespace, exc: DuplicateTranscriptError) -> int:
+    payload = exc.payload()
+    emit_progress(
+        args,
+        "skipped",
+        transcript_id=payload["transcript_id"],
+        reason="duplicate",
+        existing_transcript_id=payload["existing_transcript_id"],
+        match_type=payload["match_type"],
+        algorithm=payload["algorithm"],
+        distance=payload["distance"],
+    )
+    body = json.dumps(payload, separators=(",", ":"))
+    if getattr(args, "progress", "off") != "json":
+        print(body, file=sys.stderr if getattr(args, "output", None) else sys.stdout)
+    return 0
 
 
 def emit_progress(args: argparse.Namespace, event: str, **fields) -> None:

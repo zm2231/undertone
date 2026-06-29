@@ -6,7 +6,7 @@ Use this skill for meeting-source ingest. Quill and Google Meet can provide usef
 
 When a meeting has audio, run Undertone local ASR, diarization, embeddings, fingerprinting, and enrichment. Do not trust source-provided transcript text, speaker IDs, or diarization as the population path.
 
-Meeting ingest fails on a duplicate transcript id rather than overwriting. Pass `--force` to overwrite or `--skip-existing` to no-op.
+Meeting ingest fails on a duplicate transcript id rather than overwriting. Pass `--force` to overwrite or `--skip-existing` to no-op. Matching audio across different meeting/source ids skips before fingerprint assignment when Chromaprint `fpcalc` is installed; text simhash is advisory metadata, not a silent skip gate.
 
 ## Quill
 

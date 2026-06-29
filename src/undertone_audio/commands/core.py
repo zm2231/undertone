@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -13,14 +14,17 @@ from pydantic import ValidationError
 from undertone_audio.commands.common import (
     add_audio_pipeline_flags,
     add_duplicate_flags,
+    audio_content_signature,
     config_for_args,
     db_path,
+    emit_duplicate_skip,
     emit_progress,
     emit_transcript,
     guard_existing_transcript,
     output_format,
     progress_warning_sink,
 )
+from undertone_audio.dedupe import DuplicateTranscriptError
 from undertone_audio.engines import create_engine
 from undertone_audio.engines.base import RawTranscript
 from undertone_audio.export import OUTPUT_DETAIL_LEVELS, OUTPUT_FORMATS
@@ -96,15 +100,27 @@ def register(subcommands: argparse._SubParsersAction) -> None:
 def finalize_json_cmd(args: argparse.Namespace) -> int:
     store = _store(args)
     try:
+        config = config_for_args(args)
         if guard_existing_transcript(store, args.transcript_id, args):
             emit_progress(args, "skipped", transcript_id=args.transcript_id, reason="exists")
             return 0
+        audio_signature = None
+        if args.source_path:
+            source_path = Path(args.source_path).expanduser()
+            if source_path.exists():
+                audio_signature = audio_content_signature(
+                    store,
+                    args,
+                    config,
+                    source_path,
+                    transcript_id=args.transcript_id,
+                )
         emit_progress(args, "start", command="finalize-json", transcript_id=args.transcript_id)
         raw = RawTranscript.model_validate(_read_json(args.json_path))
         emit_progress(args, "finalizing", transcript_id=args.transcript_id)
         pipeline = AudioPipeline(
             store=store,
-            config=config_for_args(args),
+            config=config,
             warning_sink=progress_warning_sink(args),
         )
         transcript = pipeline.finalize_raw(
@@ -120,16 +136,22 @@ def finalize_json_cmd(args: argparse.Namespace) -> int:
             diarization_state=args.diarization_state,
             diarization_error_code=args.diarization_error_code,
             diarization_error_detail=args.diarization_error_detail,
+            allow_duplicate=args.allow_duplicate,
+            content_audio_fp=audio_signature.value if audio_signature else None,
+            content_audio_fp_algorithm=audio_signature.algorithm if audio_signature else None,
         )
         emit_progress(args, "saved", transcript_id=transcript.transcript_id)
         emit_transcript(transcript, args, raw=raw)
         return 0
+    except DuplicateTranscriptError as exc:
+        return emit_duplicate_skip(args, exc)
     finally:
         store.close()
 
 
 def run_wav_cmd(args: argparse.Namespace) -> int:
     config = config_for_args(args)
+    resolved_transcript_id = args.transcript_id or str(uuid.uuid4())
     store = TranscriptStore(config.db_path)
     try:
         if guard_existing_transcript(store, args.transcript_id, args):
@@ -137,12 +159,19 @@ def run_wav_cmd(args: argparse.Namespace) -> int:
             return 0
         if not args.audio_path.exists():
             raise ValueError(f"audio file not found: {args.audio_path}")
+        audio_signature = audio_content_signature(
+            store,
+            args,
+            config,
+            args.audio_path,
+            transcript_id=resolved_transcript_id,
+        )
         engine = create_engine(args.engine, config)
         emit_progress(
             args,
             "start",
             command="run-wav",
-            transcript_id=args.transcript_id,
+            transcript_id=resolved_transcript_id,
             engine=getattr(engine, "name", config.default_engine),
             audio_path=str(args.audio_path),
         )
@@ -156,15 +185,15 @@ def run_wav_cmd(args: argparse.Namespace) -> int:
         emit_progress(
             args,
             "transcribed",
-            transcript_id=args.transcript_id,
+            transcript_id=resolved_transcript_id,
             duration_ms=raw.duration_ms,
             segments=len(raw.segments),
             speakers=len(raw.speakers),
         )
-        emit_progress(args, "finalizing", transcript_id=args.transcript_id)
+        emit_progress(args, "finalizing", transcript_id=resolved_transcript_id)
         transcript = pipeline.finalize_raw(
             raw,
-            transcript_id=args.transcript_id,
+            transcript_id=resolved_transcript_id,
             recorded_at=_parse_datetime(args.recorded_at),
             source_path=str(args.audio_path),
             source_metadata=_load_source_metadata(args.source_metadata),
@@ -172,10 +201,15 @@ def run_wav_cmd(args: argparse.Namespace) -> int:
             expected_speaker_source=args.expected_speaker_source,
             audio_format=_audio_format_for_cli(args.audio_path),
             audio_path=args.audio_path,
+            allow_duplicate=args.allow_duplicate,
+            content_audio_fp=audio_signature.value if audio_signature else None,
+            content_audio_fp_algorithm=audio_signature.algorithm if audio_signature else None,
         )
         emit_progress(args, "saved", transcript_id=transcript.transcript_id)
         emit_transcript(transcript, args, raw=raw)
         return 0
+    except DuplicateTranscriptError as exc:
+        return emit_duplicate_skip(args, exc)
     finally:
         store.close()
 
@@ -240,6 +274,9 @@ def reenrich_cmd(args: argparse.Namespace) -> int:
             diarization_error_code=transcript.metadata.diarization_error_code,
             diarization_error_detail=transcript.metadata.diarization_error_detail,
             audio_format=transcript.metadata.audio_format,
+            allow_duplicate=True,
+            content_audio_fp=transcript.metadata.content_audio_fp,
+            content_audio_fp_algorithm=transcript.metadata.content_audio_fp_algorithm,
         )
         emit_progress(args, "saved", transcript_id=refreshed.transcript_id)
         emit_transcript(refreshed, args, raw=raw)

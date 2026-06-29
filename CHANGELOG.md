@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.1
+
+### Upgrade notes
+
+- **Match diagnostics are null on old transcripts until re-enriched.** Speakers now carry a nullable `match` object; transcripts ingested before this release report `match=null` until `reenrich` or a fresh ingest. A re-enrich matches against today's centroids, not the state at original ingest.
+- **Content dedupe needs `fpcalc` to skip anything.** Audio-fingerprint duplicate skipping is the only silent gate, and it is off unless Chromaprint `fpcalc` is on PATH (`doctor --check-fpcalc`). Text similarity never drops an ingest.
+
+### Added
+
+- Web media resolver: `connector-resolve` and `web-ingest` turn an article/page URL into ranked candidate recordings, then ingest the chosen one through the local pipeline. The `web` connector is force-only and never auto-steals URLs from other connectors.
+- `ConnectorCandidate` schema and `schema connector-candidate`.
+- Per-speaker fingerprint match diagnostics: `match.kind` (`strong`, `margin`, `new`, `no_enroll`, `name_match`, `preassigned`, `no_embedding`) plus diagnostic similarity values, in `load`, `raw-json`, `jsonl`, and `csv`. Absent comparison scalars are `null`, not fabricated zeroes.
+- Content dedupe: audio-fingerprint skip across different source ids, advisory text simhash for review, `--allow-duplicate` to override, and `doctor --check-fpcalc`.
+- `doctor --check-yt-dlp` / `--yt-dlp-bin` and a stale-yt-dlp warning.
+
+### Changed
+
+- Speaker output gains the additive `match` field; `Speaker.embedding` is a supported output contract.
+- `youtube-ingest` and `--connector youtube` reject non-YouTube hosts instead of silently treating them as YouTube; use `web-ingest` for article pages.
+
 ## 0.2.0
 
 ### Upgrade notes (read before upgrading an existing database)

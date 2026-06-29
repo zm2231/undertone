@@ -12,12 +12,15 @@ from undertone_audio.audio import AudioPreprocessor
 from undertone_audio.commands.common import (
     add_audio_pipeline_flags,
     add_duplicate_flags,
+    audio_content_signature,
     config_for_args,
+    emit_duplicate_skip,
     emit_progress,
     emit_transcript,
     guard_existing_transcript,
     progress_warning_sink,
 )
+from undertone_audio.dedupe import DuplicateTranscriptError
 from undertone_audio.engines import create_engine
 from undertone_audio.pipeline import AudioPipeline, _audio_format
 from undertone_audio.sources.meet import MeetSource, list_recent_conferences, list_recordings, list_transcripts
@@ -158,13 +161,8 @@ def quill_ingest_cmd(args: argparse.Namespace) -> int:
                 return 1
             print(json.dumps(report, separators=(",", ":")) if args.json else _render_quill_report(report))
             return 0
-        engine = create_engine(args.engine, config)
-        pipeline = AudioPipeline(
-            store=store,
-            engine=engine,
-            config=config,
-            warning_sink=progress_warning_sink(args),
-        )
+        engine = None
+        pipeline = None
         real_failures = 0
         for meeting, audio_path, hydrated in pending:
             try:
@@ -175,6 +173,22 @@ def quill_ingest_cmd(args: argparse.Namespace) -> int:
                     transcript_id=meeting.meeting_id,
                     audio_path=str(audio_path),
                 )
+                audio_signature = audio_content_signature(
+                    store,
+                    args,
+                    config,
+                    audio_path,
+                    transcript_id=meeting.meeting_id,
+                )
+                if engine is None:
+                    engine = create_engine(args.engine, config)
+                    pipeline = AudioPipeline(
+                        store=store,
+                        engine=engine,
+                        config=config,
+                        warning_sink=progress_warning_sink(args),
+                    )
+                assert pipeline is not None
                 raw = asyncio.run(engine.transcribe(audio_path))
                 emit_progress(
                     args,
@@ -195,8 +209,25 @@ def quill_ingest_cmd(args: argparse.Namespace) -> int:
                     expected_speaker_source=args.expected_speaker_source,
                     audio_format=_audio_format(audio_path),
                     audio_path=audio_path,
+                    allow_duplicate=args.allow_duplicate,
+                    content_audio_fp=audio_signature.value if audio_signature else None,
+                    content_audio_fp_algorithm=audio_signature.algorithm if audio_signature else None,
                 )
                 emit_progress(args, "saved", transcript_id=transcript.transcript_id)
+            except DuplicateTranscriptError as exc:
+                payload = exc.payload()
+                emit_progress(
+                    args,
+                    "skipped",
+                    transcript_id=payload["transcript_id"],
+                    reason="duplicate",
+                    existing_transcript_id=payload["existing_transcript_id"],
+                    match_type=payload["match_type"],
+                    algorithm=payload["algorithm"],
+                    distance=payload["distance"],
+                )
+                report["skipped"].append({"meeting_id": meeting.meeting_id, **payload})
+                continue
             except Exception as exc:
                 report["skipped"].append({"meeting_id": meeting.meeting_id, "error": str(exc)})
                 real_failures += 1
@@ -204,7 +235,9 @@ def quill_ingest_cmd(args: argparse.Namespace) -> int:
             report["ingested"] += 1
             if args.meeting_id:
                 emit_transcript(transcript, args, raw=raw)
-        if not args.meeting_id or real_failures:
+        if getattr(args, "progress", "off") == "json":
+            return 1 if real_failures else 0
+        if not args.meeting_id or real_failures or report["skipped"]:
             print(
                 json.dumps(report, separators=(",", ":")) if args.json else _render_quill_report(report),
                 file=sys.stderr if args.meeting_id else sys.stdout,
@@ -237,12 +270,6 @@ def meet_ingest_cmd(args: argparse.Namespace) -> int:
     )
     store = TranscriptStore(config.db_path)
     try:
-        pipeline = AudioPipeline(
-            store=store,
-            engine=create_engine(args.engine, config),
-            config=config,
-            warning_sink=progress_warning_sink(args),
-        )
         if selection.audio_path is not None:
             emit_progress(
                 args,
@@ -250,6 +277,19 @@ def meet_ingest_cmd(args: argparse.Namespace) -> int:
                 command="meet-ingest",
                 transcript_id=transcript_id,
                 audio_path=str(selection.audio_path),
+            )
+            audio_signature = audio_content_signature(
+                store,
+                args,
+                config,
+                selection.audio_path,
+                transcript_id=transcript_id,
+            )
+            pipeline = AudioPipeline(
+                store=store,
+                engine=create_engine(args.engine, config),
+                config=config,
+                warning_sink=progress_warning_sink(args),
             )
             raw = asyncio.run(pipeline.engine.transcribe(selection.audio_path))
             emit_progress(
@@ -270,6 +310,9 @@ def meet_ingest_cmd(args: argparse.Namespace) -> int:
                 expected_speaker_source=args.expected_speaker_source,
                 audio_format=_audio_format(selection.audio_path),
                 audio_path=selection.audio_path,
+                allow_duplicate=args.allow_duplicate,
+                content_audio_fp=audio_signature.value if audio_signature else None,
+                content_audio_fp_algorithm=audio_signature.algorithm if audio_signature else None,
             )
             emit_progress(args, "saved", transcript_id=transcript.transcript_id)
             emit_transcript(transcript, args, raw=raw)
@@ -279,7 +322,7 @@ def meet_ingest_cmd(args: argparse.Namespace) -> int:
         fallback_config = replace(config, min_talk_seconds=0)
         pipeline = AudioPipeline(
             store=store,
-            engine=pipeline.engine,
+            engine=create_engine(args.engine, config),
             config=fallback_config,
             warning_sink=progress_warning_sink(args),
         )
@@ -295,10 +338,13 @@ def meet_ingest_cmd(args: argparse.Namespace) -> int:
             diarization_error_code="no-audio",
             diarization_error_detail="No local or downloadable Meet recording was available.",
             apply_speaker_processing=True,
+            allow_duplicate=args.allow_duplicate,
         )
         emit_progress(args, "saved", transcript_id=transcript.transcript_id)
         emit_transcript(transcript, args, raw=selection.raw_fallback)
         return 0
+    except DuplicateTranscriptError as exc:
+        return emit_duplicate_skip(args, exc)
     finally:
         store.close()
 

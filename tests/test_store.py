@@ -25,6 +25,10 @@ def test_store_roundtrips_raw_transcript_without_attribution_tables(tmp_path):
                 duration_ms=1000,
                 engine="test",
                 diarization_state="ok",
+                content_text_simhash="0123456789abcdef",
+                content_text_simhash_algorithm="simhash64-token-word4-v1",
+                content_audio_fp="abc123",
+                content_audio_fp_algorithm="chromaprint-fpcalc-v1",
                 source_metadata={"title": "raw meeting"},
             ),
             speakers=[Speaker(speaker_id="S1", fingerprint_id="VP-1", embedding=[0.1, 0.2])],
@@ -37,6 +41,10 @@ def test_store_roundtrips_raw_transcript_without_attribution_tables(tmp_path):
         assert transcript.store_ref == f"sqlite:{db.resolve()}#meeting-1"
         assert loaded.store_ref == f"sqlite:{db.resolve()}#meeting-1"
         assert loaded.metadata.video_path == "video.webm"
+        assert loaded.metadata.content_text_simhash == "0123456789abcdef"
+        assert loaded.metadata.content_text_simhash_algorithm == "simhash64-token-word4-v1"
+        assert loaded.metadata.content_audio_fp == "abc123"
+        assert loaded.metadata.content_audio_fp_algorithm == "chromaprint-fpcalc-v1"
         assert loaded.metadata.source_metadata == {"title": "raw meeting"}
         assert loaded.speakers[0].fingerprint_id == "VP-1"
         assert loaded.speakers[0].embedding == [0.1, 0.2]

@@ -9,7 +9,8 @@ from undertone_audio import webhooks
 from undertone_audio.commands import fingerprints as fingerprint_commands
 from undertone_audio.commands.common import config_for_args
 from undertone_audio.engines.base import RawTranscript
-from undertone_audio.schema import Segment, Speaker
+from undertone_audio.schema import EnrichedTranscript, Segment, Speaker, TranscriptMetadata
+from undertone_audio.storage import TranscriptStore
 from undertone_audio.cli import _configure_logging, _parser, main
 
 
@@ -1386,6 +1387,204 @@ def test_cli_duplicate_controls_for_finalize_json(tmp_path, capsys):
         )
         == 0
     )
+
+
+def test_cli_text_signature_does_not_skip_different_transcript_id(tmp_path, capsys):
+    raw_path = tmp_path / "raw.json"
+    raw_path.write_text(
+        json.dumps(
+            {
+                "duration_ms": 1000,
+                "language": "en",
+                "engine": "fixture",
+                "speakers": [{"speaker_id": "S1"}],
+                "segments": [
+                    {
+                        "segment_id": "seg1",
+                        "speaker_id": "S1",
+                        "start_ms": 0,
+                        "end_ms": 1000,
+                        "text": "same meeting agenda decisions blockers and next steps",
+                    }
+                ],
+            }
+        )
+    )
+    db = tmp_path / "undertone.db"
+
+    assert main(["--db", str(db), "finalize-json", str(raw_path), "--transcript-id", "source-a"]) == 0
+    capsys.readouterr()
+    assert main(["--db", str(db), "finalize-json", str(raw_path), "--transcript-id", "source-b"]) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second["transcript_id"] == "source-b"
+    assert second["metadata"]["content_text_simhash"]
+
+    assert (
+        main(
+            [
+                "--db",
+                str(db),
+                "finalize-json",
+                str(raw_path),
+                "--transcript-id",
+                "source-c",
+                "--progress",
+                "json",
+            ]
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["transcript_id"] == "source-c"
+    events = [json.loads(line) for line in captured.err.splitlines()]
+    assert events[-1]["event"] == "saved"
+    assert events[-1]["transcript_id"] == "source-c"
+
+
+def test_cli_finalize_json_audio_duplicate_uses_source_path(tmp_path, monkeypatch, capsys):
+    raw_path = tmp_path / "raw.json"
+    raw_path.write_text(
+        json.dumps(
+            {
+                "duration_ms": 1000,
+                "language": "en",
+                "engine": "fixture",
+                "speakers": [{"speaker_id": "S1"}],
+                "segments": [
+                    {
+                        "segment_id": "seg1",
+                        "speaker_id": "S1",
+                        "start_ms": 0,
+                        "end_ms": 1000,
+                        "text": "audio duplicate source path",
+                    }
+                ],
+            }
+        )
+    )
+    db = tmp_path / "undertone.db"
+    store = TranscriptStore(db)
+    try:
+        store.save(
+            EnrichedTranscript(
+                transcript_id="existing-audio",
+                metadata=TranscriptMetadata(
+                    duration_ms=1000,
+                    engine="fixture",
+                    content_audio_fp="audio-fp",
+                    content_audio_fp_algorithm="chromaprint-fpcalc-v1",
+                ),
+                speakers=[Speaker(speaker_id="S1")],
+                segments=[
+                    Segment(
+                        segment_id="seg1",
+                        speaker_id="S1",
+                        start_ms=0,
+                        end_ms=1000,
+                        text="existing audio",
+                    )
+                ],
+            )
+        )
+    finally:
+        store.close()
+
+    class FakeSignature:
+        value = "audio-fp"
+        algorithm = "chromaprint-fpcalc-v1"
+
+    monkeypatch.setattr("undertone_audio.commands.common.audio_signature_for_path", lambda *a, **k: FakeSignature())
+    audio = tmp_path / "fixture.m4a"
+    audio.write_bytes(b"audio")
+
+    assert (
+        main(
+            [
+                "--db",
+                str(db),
+                "finalize-json",
+                str(raw_path),
+                "--transcript-id",
+                "new-audio",
+                "--source-path",
+                str(audio),
+            ]
+        )
+        == 0
+    )
+    duplicate = json.loads(capsys.readouterr().out)
+    assert duplicate["skipped"] is True
+    assert duplicate["existing_transcript_id"] == "existing-audio"
+    assert duplicate["match_type"] == "audio"
+
+    assert (
+        main(
+            [
+                "--db",
+                str(db),
+                "finalize-json",
+                str(raw_path),
+                "--transcript-id",
+                "new-audio",
+                "--source-path",
+                str(audio),
+                "--allow-duplicate",
+            ]
+        )
+        == 0
+    )
+    transcript = json.loads(capsys.readouterr().out)
+    assert transcript["metadata"]["content_audio_fp"] == "audio-fp"
+
+
+def test_cli_run_wav_audio_duplicate_skips_before_engine(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "undertone.db"
+    store = TranscriptStore(db)
+    try:
+        store.save(
+            EnrichedTranscript(
+                transcript_id="existing-audio",
+                metadata=TranscriptMetadata(
+                    duration_ms=1000,
+                    engine="fixture",
+                    content_audio_fp="audio-fp",
+                    content_audio_fp_algorithm="chromaprint-fpcalc-v1",
+                ),
+                speakers=[Speaker(speaker_id="S1")],
+                segments=[
+                    Segment(
+                        segment_id="seg1",
+                        speaker_id="S1",
+                        start_ms=0,
+                        end_ms=1000,
+                        text="existing audio",
+                    )
+                ],
+            )
+        )
+    finally:
+        store.close()
+
+    class FakeSignature:
+        value = "audio-fp"
+        algorithm = "chromaprint-fpcalc-v1"
+
+    def fail_create_engine(*args, **kwargs):
+        raise AssertionError("duplicate audio should skip before engine construction")
+
+    monkeypatch.setattr("undertone_audio.commands.common.audio_signature_for_path", lambda *a, **k: FakeSignature())
+    monkeypatch.setattr("undertone_audio.commands.core.create_engine", fail_create_engine)
+    monkeypatch.setenv("UNDERTONE_WEBHOOK_ENABLED", "0")
+    audio = tmp_path / "fixture.wav"
+    audio.write_bytes(b"not a real wav")
+
+    assert main(["--db", str(db), "run-wav", str(audio)]) == 0
+    duplicate = json.loads(capsys.readouterr().out)
+    assert duplicate["skipped"] is True
+    assert duplicate["reason"] == "duplicate"
+    assert duplicate["transcript_id"]
+    assert duplicate["existing_transcript_id"] == "existing-audio"
+    assert duplicate["match_type"] == "audio"
 
 
 def test_cli_reports_missing_transcript(tmp_path, capsys):

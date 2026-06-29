@@ -17,6 +17,10 @@ from undertone_audio.schema import (
     TranscriptMetadata,
     Word,
 )
+from undertone_audio.dedupe import (
+    ContentDuplicate,
+    text_signature_for_texts,
+)
 from undertone_audio.privacy import sanitize_source_metadata
 from undertone_audio.diarization.fingerprint import (
     FingerprintAssignmentPlan,
@@ -70,6 +74,7 @@ class TranscriptStore:
         self._ensure_speaker_columns()
         self._ensure_core_tables()
         self._ensure_fingerprint_columns()
+        self._backfill_content_text_signatures()
 
     def _ensure_transcript_columns(self) -> None:
         existing = {row[1] for row in self._conn.execute("PRAGMA table_info(transcripts)")}
@@ -82,10 +87,59 @@ class TranscriptStore:
             "model_versions": "TEXT",
             "audio_format": "TEXT",
             "raw_transcript_json": "TEXT",
+            "content_text_simhash": "TEXT",
+            "content_text_simhash_algorithm": "TEXT",
+            "content_audio_fp": "TEXT",
+            "content_audio_fp_algorithm": "TEXT",
         }
         for name, definition in columns.items():
             if name not in existing:
                 self._conn.execute(f"ALTER TABLE transcripts ADD COLUMN {name} {definition}")
+        self._conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_transcripts_content_audio_fp
+               ON transcripts(content_audio_fp_algorithm, content_audio_fp)"""
+        )
+        self._conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_transcripts_content_text_simhash
+               ON transcripts(content_text_simhash_algorithm, content_text_simhash)"""
+        )
+        self._conn.commit()
+
+    def _backfill_content_text_signatures(self) -> None:
+        transcript_columns = self._table_columns("transcripts")
+        if (
+            "content_text_simhash" not in transcript_columns
+            or "content_text_simhash_algorithm" not in transcript_columns
+        ):
+            return
+        if "segments" not in self._table_names():
+            return
+        segment_columns = self._table_columns("segments")
+        if "transcript_id" not in segment_columns or "text" not in segment_columns:
+            return
+        rows = self._conn.execute(
+            """SELECT transcript_id FROM transcripts
+               WHERE content_text_simhash IS NULL
+               ORDER BY created_at, transcript_id"""
+        ).fetchall()
+        for row in rows:
+            segment_rows = self._conn.execute(
+                """SELECT text FROM segments
+                   WHERE transcript_id = ?
+                   ORDER BY start_ms, segment_id""",
+                (row["transcript_id"],),
+            ).fetchall()
+            signature = text_signature_for_texts(segment["text"] or "" for segment in segment_rows)
+            if signature is None:
+                continue
+            self._conn.execute(
+                """UPDATE transcripts
+                   SET content_text_simhash = ?,
+                       content_text_simhash_algorithm = ?
+                   WHERE transcript_id = ?
+                     AND content_text_simhash IS NULL""",
+                (signature.value, signature.algorithm, row["transcript_id"]),
+            )
         self._conn.commit()
 
     def _ensure_segment_columns(self) -> None:
@@ -177,6 +231,12 @@ class TranscriptStore:
     def _table_columns(self, table: str) -> set[str]:
         return {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
 
+    def _table_names(self) -> set[str]:
+        return {
+            row["name"]
+            for row in self._conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+
     def save(self, transcript: EnrichedTranscript) -> None:
         self.save_with_fingerprint_plan(transcript, None)
 
@@ -186,6 +246,34 @@ class TranscriptStore:
             (transcript_id,),
         ).fetchone()
         return row is not None
+
+    def find_audio_duplicate(
+        self,
+        fingerprint: str,
+        algorithm: str,
+        *,
+        exclude_transcript_id: str | None = None,
+    ) -> ContentDuplicate | None:
+        columns = self._table_columns("transcripts")
+        if "content_audio_fp" not in columns or "content_audio_fp_algorithm" not in columns:
+            return None
+        row = self._conn.execute(
+            """SELECT transcript_id FROM transcripts
+               WHERE content_audio_fp = ?
+                 AND content_audio_fp_algorithm = ?
+                 AND (? IS NULL OR transcript_id != ?)
+               ORDER BY created_at, transcript_id
+               LIMIT 1""",
+            (fingerprint, algorithm, exclude_transcript_id, exclude_transcript_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return ContentDuplicate(
+            transcript_id=row["transcript_id"],
+            match_type="audio",
+            algorithm=algorithm,
+            distance=0,
+        )
 
     def save_with_fingerprint_plan(
         self,
@@ -240,70 +328,63 @@ class TranscriptStore:
         raw_transcript=None,
     ) -> None:
         c = self._conn.cursor()
-        c.execute(
-            """INSERT INTO transcripts
-               (transcript_id, source_path, source_url, video_path, duration_ms, language,
-                meeting_type, meeting_type_confidence, recorded_at, engine,
-                asr_backend, diarization_backend, vad_backend, embedding_backend,
-                fingerprint_backend, model_versions, audio_format,
-                raw_transcript_json, pipeline_version, schema_version, expected_speaker_count,
-                expected_speaker_source, source_metadata, diarization_state,
-                diarization_error_code, diarization_error_detail)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(transcript_id) DO UPDATE SET
-                 source_path = excluded.source_path,
-                 source_url = excluded.source_url,
-                 video_path = excluded.video_path,
-                 duration_ms = excluded.duration_ms,
-                 language = excluded.language,
-                 meeting_type = excluded.meeting_type,
-                 meeting_type_confidence = excluded.meeting_type_confidence,
-                 recorded_at = excluded.recorded_at,
-                 engine = excluded.engine,
-                 asr_backend = excluded.asr_backend,
-                 diarization_backend = excluded.diarization_backend,
-                 vad_backend = excluded.vad_backend,
-                 embedding_backend = excluded.embedding_backend,
-                 fingerprint_backend = excluded.fingerprint_backend,
-                 model_versions = excluded.model_versions,
-                 audio_format = excluded.audio_format,
-                 raw_transcript_json = COALESCE(excluded.raw_transcript_json, transcripts.raw_transcript_json),
-                 pipeline_version = excluded.pipeline_version,
-                 schema_version = excluded.schema_version,
-                 expected_speaker_count = excluded.expected_speaker_count,
-                 expected_speaker_source = excluded.expected_speaker_source,
-                 source_metadata = excluded.source_metadata,
-                 diarization_state = excluded.diarization_state,
-                 diarization_error_code = excluded.diarization_error_code,
-                 diarization_error_detail = excluded.diarization_error_detail""",
+        transcript_columns = {row[1] for row in c.execute("PRAGMA table_info(transcripts)")}
+        transcript_values = [
+            ("transcript_id", transcript.transcript_id),
+            ("source_path", m.source_path),
+            ("source_url", m.source_url),
+            ("video_path", m.video_path),
+            ("duration_ms", m.duration_ms),
+            ("language", m.language),
+            ("meeting_type", m.meeting_type.value),
+            ("meeting_type_confidence", m.meeting_type_confidence),
+            ("recorded_at", m.recorded_at.isoformat() if m.recorded_at else None),
+            ("engine", m.engine),
+            ("asr_backend", m.asr_backend),
+            ("diarization_backend", m.diarization_backend),
+            ("vad_backend", m.vad_backend),
+            ("embedding_backend", m.embedding_backend),
+            ("fingerprint_backend", m.fingerprint_backend),
+            ("model_versions", json.dumps(m.model_versions) if m.model_versions else None),
+            ("audio_format", json.dumps(m.audio_format) if m.audio_format else None),
             (
-                transcript.transcript_id,
-                m.source_path,
-                m.source_url,
-                m.video_path,
-                m.duration_ms,
-                m.language,
-                m.meeting_type.value,
-                m.meeting_type_confidence,
-                m.recorded_at.isoformat() if m.recorded_at else None,
-                m.engine,
-                m.asr_backend,
-                m.diarization_backend,
-                m.vad_backend,
-                m.embedding_backend,
-                m.fingerprint_backend,
-                json.dumps(m.model_versions) if m.model_versions else None,
-                json.dumps(m.audio_format) if m.audio_format else None,
+                "raw_transcript_json",
                 raw_transcript.model_dump_json() if raw_transcript is not None else None,
-                m.pipeline_version,
-                transcript.schema_version,
-                m.expected_speaker_count,
-                m.expected_speaker_source,
-                json.dumps(sanitize_source_metadata(m.source_metadata)) if m.source_metadata else None,
-                m.diarization_state,
-                m.diarization_error_code,
-                m.diarization_error_detail,
             ),
+            ("content_text_simhash", m.content_text_simhash),
+            ("content_text_simhash_algorithm", m.content_text_simhash_algorithm),
+            ("content_audio_fp", m.content_audio_fp),
+            ("content_audio_fp_algorithm", m.content_audio_fp_algorithm),
+            ("pipeline_version", m.pipeline_version),
+            ("schema_version", transcript.schema_version),
+            ("expected_speaker_count", m.expected_speaker_count),
+            ("expected_speaker_source", m.expected_speaker_source),
+            (
+                "source_metadata",
+                json.dumps(sanitize_source_metadata(m.source_metadata)) if m.source_metadata else None,
+            ),
+            ("diarization_state", m.diarization_state),
+            ("diarization_error_code", m.diarization_error_code),
+            ("diarization_error_detail", m.diarization_error_detail),
+        ]
+        included = [(name, value) for name, value in transcript_values if name in transcript_columns]
+        columns = [name for name, _value in included]
+        placeholders = ", ".join("?" for _name in columns)
+        updates = []
+        for name in columns:
+            if name == "transcript_id":
+                continue
+            if name == "raw_transcript_json":
+                updates.append(
+                    "raw_transcript_json = COALESCE(excluded.raw_transcript_json, transcripts.raw_transcript_json)"
+                )
+            else:
+                updates.append(f"{name} = excluded.{name}")
+        c.execute(
+            f"""INSERT INTO transcripts ({", ".join(columns)})
+                VALUES ({placeholders})
+                ON CONFLICT(transcript_id) DO UPDATE SET {", ".join(updates)}""",
+            tuple(value for _name, value in included),
         )
 
         speaker_ids = {speaker.speaker_id for speaker in transcript.speakers}
@@ -474,6 +555,10 @@ class TranscriptStore:
             fingerprint_backend=t_row["fingerprint_backend"],
             model_versions=json.loads(t_row["model_versions"]) if t_row["model_versions"] else {},
             audio_format=json.loads(t_row["audio_format"]) if t_row["audio_format"] else {},
+            content_text_simhash=_row_value(t_row, "content_text_simhash"),
+            content_text_simhash_algorithm=_row_value(t_row, "content_text_simhash_algorithm"),
+            content_audio_fp=_row_value(t_row, "content_audio_fp"),
+            content_audio_fp_algorithm=_row_value(t_row, "content_audio_fp_algorithm"),
             pipeline_version=t_row["pipeline_version"],
             expected_speaker_count=t_row["expected_speaker_count"],
             expected_speaker_source=t_row["expected_speaker_source"],
@@ -1242,3 +1327,7 @@ def _normalize_fingerprint_rows(rows: list[dict]) -> list[dict]:
             raise ValueError(f"duplicate fingerprint_id in import file: {fingerprint_id}")
         seen.add(fingerprint_id)
     return normalized
+
+
+def _row_value(row: sqlite3.Row, key: str, default=None):
+    return row[key] if key in row.keys() else default

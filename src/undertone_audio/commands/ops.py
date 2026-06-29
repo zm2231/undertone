@@ -51,6 +51,8 @@ def register(subcommands: argparse._SubParsersAction) -> None:
     doctor = subcommands.add_parser("doctor", help="Run local undertone preflight checks.")
     doctor.add_argument("--check-yt-dlp", action="store_true")
     doctor.add_argument("--yt-dlp-bin", default="yt-dlp", help="yt-dlp binary name/path for --check-yt-dlp.")
+    doctor.add_argument("--check-fpcalc", action="store_true")
+    doctor.add_argument("--fpcalc-bin", default="fpcalc", help="fpcalc binary name/path for --check-fpcalc.")
     doctor.add_argument("--check-meet", action="store_true")
     doctor.add_argument("--check-pyannote", action="store_true")
     doctor.add_argument("--all", action="store_true", help="Check all optional integrations.")
@@ -258,6 +260,20 @@ def doctor_cmd(args: argparse.Namespace) -> int:
             }
         )
         ok = ok and path is not None
+    if args.check_fpcalc or args.all:
+        path = shutil.which(args.fpcalc_bin)
+        checks.append(
+            {
+                "name": "fpcalc",
+                "ok": path is not None,
+                "binary": args.fpcalc_bin,
+                "path": path,
+                "required": False,
+                "fix": None
+                if path
+                else "Optional: install Chromaprint/fpcalc for pre-ASR content dedupe (`brew install chromaprint`).",
+            }
+        )
     if args.check_pyannote or args.all:
         pyannote = pyannote_status(config.pyannote_model, config.pyannote_device)
         checks.append(
