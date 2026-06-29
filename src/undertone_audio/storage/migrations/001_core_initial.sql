@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS speakers (
     fingerprint_id TEXT,
     display_name TEXT,
     embedding TEXT,
+    match_json TEXT,
     PRIMARY KEY (transcript_id, speaker_id)
 );
 

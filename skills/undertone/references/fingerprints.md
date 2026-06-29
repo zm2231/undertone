@@ -21,7 +21,9 @@ undertone --db ./undertone.db relabel meeting-1
 undertone --db ./undertone.db relabel --all
 ```
 
-`fingerprint-label` sets the display name on a voiceprint. `relabel` re-stamps saved transcript speaker names from the current fingerprint DB without re-running ASR, diarization, or enrichment, so it is the cheap "label then fix the back catalog" path. Pass a single transcript id or `--all`; passing both an id and `--all` is rejected.
+`fingerprint-label` sets the display name on a voiceprint. `relabel` re-stamps saved transcript speaker names from the current fingerprint DB without re-running ASR, diarization, enrichment, or fingerprint matching, so it is the cheap "label then fix the back catalog" path. Pass a single transcript id or `--all`; passing both an id and `--all` is rejected.
+
+`reenrich` is different: it rebuilds enrichment from the saved raw transcript without retranscribing audio. Use `reenrich` after changing thresholds or feature toggles. It re-runs fingerprint matching against today's fingerprint centroids, so fingerprint match diagnostics reflect the current library, not necessarily the exact state at original ingest time.
 
 ## Corrective actions
 
@@ -42,18 +44,23 @@ undertone --db ./undertone.db fingerprint-destroy VP-bad --yes
 
 Fingerprinting is duration-gated on every engine, not just pyannote. A speaker below the enroll threshold of total talk time does not mint a durable cross-recording fingerprint, and a sample below the update threshold is not folded into a stored centroid. This is deliberate: short, noisy speakers are the main source of garbage identities. A brief speaker still appears in the transcript with per-recording diarization; it just does not get a stable durable identity.
 
-## Over-segmentation and merge
+## Known Counts, Spurious Splits, and Merge
 
-If diarization splits one person into two voiceprints, tune it at ingest or merge after the fact:
+Use `--expected-speaker-count` only when you know how many speakers are actually present in the recording. It is a known-count hint, not a de-duplication or merge knob. Sponsor reads, ad voices, brief guests, and short co-speakers can be legitimate distinct speakers.
+
+If diarization splits one person into two voiceprints, tune fingerprint matching at ingest or merge after the fact:
 
 ```bash
-undertone --db ./undertone.db run-wav ./ep.wav --expected-speaker-count 1
 undertone --db ./undertone.db run-wav ./ep.wav --fingerprint-similarity-threshold 0.78
 undertone --db ./undertone.db fingerprint-merge VP-spurious VP-canonical --dry-run
 undertone --db ./undertone.db fingerprint-merge VP-spurious VP-canonical --yes
 ```
 
-`--expected-speaker-count` collapses over-detected speakers toward the expected count. `--fingerprint-similarity-threshold` (or `UNDERTONE_SPEAKER_MERGE_THRESHOLD`) controls how aggressively new speakers match an existing voiceprint. `fingerprint-merge` folds a spurious active voiceprint into a canonical active one and restamps the affected speaker rows; it refuses to merge discarded prints or voiceprints from different embedding models.
+`--fingerprint-similarity-threshold` (or `UNDERTONE_FINGERPRINT_SIMILARITY_THRESHOLD`) controls how aggressively new speakers match an existing voiceprint across recordings. `UNDERTONE_SPEAKER_MERGE_THRESHOLD` is separate: it controls same-recording speaker collapse before fingerprint assignment. `fingerprint-merge` folds a spurious active voiceprint into a canonical active one and restamps the affected speaker rows; it refuses to merge discarded prints or voiceprints from different embedding models.
+
+## Match Diagnostics
+
+Saved transcript speakers include a nullable `match` object. `match.kind` is the authoritative signal (`strong`, `margin`, `new`, `no_enroll`, `name_match`, `preassigned`, or `no_embedding`). Similarity and margin values are diagnostic scalars from the fingerprint matcher, not portable probabilities; thresholds depend on the active embedding model and configuration. If no comparison happened, `similarity` is `null`; if there was no real runner-up, `second_similarity` and `margin` are `null`. Legacy transcripts show `match=null` until they are reenriched or ingested again.
 
 ## Export and import
 

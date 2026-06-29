@@ -20,7 +20,7 @@ Use `emit-ready` only after verifying the transcript is present and downstream w
 ## Formats
 
 - `json`: full `EnrichedTranscript`.
-- `raw-json`: persisted pre-enrichment `RawTranscript` shape.
+- `raw-json`: persisted raw transcript segments plus current speaker attribution fields (`fingerprint_id`, `display_name`, and `match`) when available.
 - `text`: readable speaker summary and transcript.
 - `md`: markdown speaker summary and transcript.
 - `jsonl`: one segment per line with enrichment payload.

@@ -57,6 +57,8 @@ FluidAudio model selections are passed to the FluidAudio boundary. Pyannote sele
 
 Speaker fingerprints are namespaced by the effective embedding model. For `fluidaudio-pyannote`, the fingerprint model is the resolved pyannote model; otherwise it is `UNDERTONE_EMBEDDING_MODEL` / `--embedding-model`. Legacy fingerprints with no model tag are dormant and should trigger `doctor`/ingest warnings. Use `fingerprint-adopt-model --dry-run` only when asserting that old vectors were produced by the active model; it does not convert vectors across embedding spaces.
 
+Use `--expected-speaker-count` only when the recording's true speaker count is known. It is a diarization hint, not a voiceprint de-duplication knob. Brief co-speakers, sponsor reads, and ad voices may be real speakers; use `--fingerprint-similarity-threshold` or `fingerprint-merge` for spurious splits of the same person.
+
 ## External Process Bounds
 
 FluidAudio and ffmpeg/ffprobe subprocesses are bounded. Use `--process-timeout-seconds` or `UNDERTONE_PROCESS_TIMEOUT_SECONDS` to adjust the limit for long media. The default is `7200`; set `0` only when intentionally disabling subprocess timeouts.
@@ -70,6 +72,7 @@ Fingerprinting is duration-gated on every engine, not just pyannote. A speaker w
 - Word ASR confidence is preserved as `words[].confidence`.
 - Segment ASR confidence is derived as `segments[].asr_confidence`.
 - `segments[].diarization_quality` is nullable.
+- Speaker fingerprint matching is exposed as nullable `speakers[].match`. Use `match.kind` as the decision category; similarity and margin values are diagnostic, model-dependent scalars.
 - `fluidaudio-cli` preserves FluidAudio process `qualityScore`.
 - `fluidaudio-hybrid` overlap-maps process `qualityScore` onto Sortformer spans when possible; partial coverage is expected.
 - `fluidaudio-pyannote` emits `null` for diarization quality because pyannote's public `DiarizeOutput` does not expose per-span confidence or posteriors.

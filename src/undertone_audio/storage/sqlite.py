@@ -67,6 +67,7 @@ class TranscriptStore:
                 raise
         self._ensure_transcript_columns()
         self._ensure_segment_columns()
+        self._ensure_speaker_columns()
         self._ensure_core_tables()
         self._ensure_fingerprint_columns()
 
@@ -96,6 +97,16 @@ class TranscriptStore:
         for name, definition in columns.items():
             if name not in existing:
                 self._conn.execute(f"ALTER TABLE segments ADD COLUMN {name} {definition}")
+        self._conn.commit()
+
+    def _ensure_speaker_columns(self) -> None:
+        existing = {row[1] for row in self._conn.execute("PRAGMA table_info(speakers)")}
+        columns = {
+            "match_json": "TEXT",
+        }
+        for name, definition in columns.items():
+            if name not in existing:
+                self._conn.execute(f"ALTER TABLE speakers ADD COLUMN {name} {definition}")
         self._conn.commit()
 
     def _ensure_core_tables(self) -> None:
@@ -308,20 +319,27 @@ class TranscriptStore:
 
         c.execute("DELETE FROM fingerprint_sources WHERE transcript_id = ?", (transcript.transcript_id,))
         c.execute("DELETE FROM speakers WHERE transcript_id = ?", (transcript.transcript_id,))
+        speaker_columns = {row[1] for row in c.execute("PRAGMA table_info(speakers)")}
+        match_json_supported = "match_json" in speaker_columns
+        insert_columns = "transcript_id, speaker_id, fingerprint_id, display_name, embedding"
+        if match_json_supported:
+            insert_columns += ", match_json"
+        placeholders = ", ".join("?" for _ in insert_columns.split(", "))
+        speaker_rows = []
+        for speaker in transcript.speakers:
+            row = [
+                transcript.transcript_id,
+                speaker.speaker_id,
+                speaker.fingerprint_id,
+                speaker.display_name,
+                json.dumps(speaker.embedding) if speaker.embedding else None,
+            ]
+            if match_json_supported:
+                row.append(speaker.match.model_dump_json() if speaker.match else None)
+            speaker_rows.append(tuple(row))
         c.executemany(
-            """INSERT INTO speakers
-               (transcript_id, speaker_id, fingerprint_id, display_name, embedding)
-               VALUES (?, ?, ?, ?, ?)""",
-            [
-                (
-                    transcript.transcript_id,
-                    speaker.speaker_id,
-                    speaker.fingerprint_id,
-                    speaker.display_name,
-                    json.dumps(speaker.embedding) if speaker.embedding else None,
-                )
-                for speaker in transcript.speakers
-            ],
+            f"INSERT INTO speakers ({insert_columns}) VALUES ({placeholders})",
+            speaker_rows,
         )
 
         c.execute("DELETE FROM segments WHERE transcript_id = ?", (transcript.transcript_id,))
@@ -414,6 +432,9 @@ class TranscriptStore:
                 fingerprint_id=row["fingerprint_id"],
                 display_name=row["display_name"],
                 embedding=json.loads(row["embedding"]) if row["embedding"] else None,
+                match=json.loads(row["match_json"])
+                if "match_json" in row.keys() and row["match_json"]
+                else None,
             )
             for row in c.execute(
                 "SELECT * FROM speakers WHERE transcript_id = ?",

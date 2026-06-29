@@ -207,12 +207,15 @@ def test_relabel_restamps_saved_speaker_names_without_reenrich(tmp_path, capsys)
     created = json.loads(capsys.readouterr().out)
     fingerprint_id = created["speakers"][0]["fingerprint_id"]
     assert created["speakers"][0]["display_name"] is None
+    assert created["speakers"][0]["match"]["kind"] == "new"
 
     assert main(["--db", str(db), "fingerprint-label", fingerprint_id, "Alex Rivera"]) == 0
     capsys.readouterr()
     assert main(["--db", str(db), "load", "name-1"]) == 0
     before = json.loads(capsys.readouterr().out)
     assert before["speakers"][0]["display_name"] is None
+    before_match = before["speakers"][0]["match"]
+    assert before_match["kind"] == "new"
 
     assert main(["--db", str(db), "relabel", "name-1", "--json"]) == 0
     relabel = json.loads(capsys.readouterr().out)
@@ -220,6 +223,12 @@ def test_relabel_restamps_saved_speaker_names_without_reenrich(tmp_path, capsys)
     assert main(["--db", str(db), "load", "name-1"]) == 0
     after = json.loads(capsys.readouterr().out)
     assert after["speakers"][0]["display_name"] == "Alex Rivera"
+    assert after["speakers"][0]["match"] == before_match
+
+    assert main(["--db", str(db), "load", "name-1", "--output-format", "raw-json"]) == 0
+    raw_payload = json.loads(capsys.readouterr().out)
+    assert raw_payload["speakers"][0]["display_name"] == "Alex Rivera"
+    assert raw_payload["speakers"][0]["match"] == before_match
 
 
 def test_relabel_does_not_blank_name_when_fingerprint_row_missing(tmp_path, capsys):
@@ -299,6 +308,9 @@ def test_schema_command_and_progress_jsonl(tmp_path, capsys):
     assert main(["schema", "connector-asset"]) == 0
     schema = json.loads(capsys.readouterr().out)
     assert schema["properties"]["schema_version"]["const"] == "1"
+    assert main(["schema", "transcript"]) == 0
+    transcript_schema = json.loads(capsys.readouterr().out)
+    assert "FingerprintMatch" in transcript_schema["$defs"]
 
     assert (
         main(

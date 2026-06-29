@@ -484,6 +484,9 @@ def test_fingerprint_store_assigns_and_updates_mean(tmp_path):
             persist=False,
         )
         assert speakers[0].fingerprint_id is not None
+        assert speakers[0].match is not None
+        assert speakers[0].match.kind == "new"
+        assert speakers[0].match.embedding_model is None
         assert fingerprints.list_all() == []
         plan.commit()
 
@@ -492,6 +495,12 @@ def test_fingerprint_store_assigns_and_updates_mean(tmp_path):
             persist=False,
         )
         assert matched[0].fingerprint_id == speakers[0].fingerprint_id
+        assert matched[0].match is not None
+        assert matched[0].match.kind == "strong"
+        assert matched[0].match.similarity > 0.99
+        assert matched[0].match.second_similarity is None
+        assert matched[0].match.margin is None
+        assert matched[0].match.similarity_threshold == 0.95
         plan.commit()
 
         row = store._conn.execute(
@@ -499,6 +508,47 @@ def test_fingerprint_store_assigns_and_updates_mean(tmp_path):
             (speakers[0].fingerprint_id,),
         ).fetchone()
         assert row["sample_count"] == 2
+    finally:
+        store.close()
+
+
+def test_fingerprint_match_kinds_cover_non_acoustic_branches(tmp_path):
+    db = tmp_path / "undertone.db"
+    store = TranscriptStore(db)
+    try:
+        fingerprints = SpeakerFingerprintStore(db, embedding_model="fixture-model")
+        enrolled, plan = fingerprints.assign_fingerprints(
+            [Speaker(speaker_id="S1", embedding=[1.0, 0.0], display_name="Alex")],
+            persist=False,
+            speaker_durations_ms={"S1": 16000},
+        )
+        plan.commit()
+        fingerprint_id = enrolled[0].fingerprint_id
+
+        preassigned, _plan = fingerprints.assign_fingerprints(
+            [Speaker(speaker_id="S2", fingerprint_id=fingerprint_id)],
+            persist=False,
+        )
+        assert preassigned[0].match is not None
+        assert preassigned[0].match.kind == "preassigned"
+        assert preassigned[0].match.similarity is None
+
+        name_matched, _plan = fingerprints.assign_fingerprints(
+            [Speaker(speaker_id="S3", display_name="alex")],
+            persist=False,
+        )
+        assert name_matched[0].fingerprint_id == fingerprint_id
+        assert name_matched[0].match is not None
+        assert name_matched[0].match.kind == "name_match"
+        assert name_matched[0].match.similarity is None
+
+        no_embedding, _plan = fingerprints.assign_fingerprints(
+            [Speaker(speaker_id="S4")],
+            persist=False,
+        )
+        assert no_embedding[0].fingerprint_id is None
+        assert no_embedding[0].match is not None
+        assert no_embedding[0].match.kind == "no_embedding"
     finally:
         store.close()
 
@@ -759,6 +809,12 @@ def test_margin_match_recovers_cross_channel_speaker(tmp_path):
         )
         plan3.commit()
         assert matched[0].fingerprint_id == canonical_id
+        assert matched[0].match is not None
+        assert matched[0].match.kind == "margin"
+        assert matched[0].match.second_similarity is not None
+        assert abs(matched[0].match.second_similarity - 0.0) < 0.001
+        assert matched[0].match.margin is not None
+        assert matched[0].match.margin >= 0.15
         # Still exactly 2 prints, no duplicate minted.
         assert len(fp.list_all()) == 2
     finally:
@@ -777,7 +833,41 @@ def test_quality_gate_blocks_short_segment_enrollment(tmp_path):
         )
         plan.commit()
         assert speakers[0].fingerprint_id is None
+        assert speakers[0].match is not None
+        assert speakers[0].match.kind == "no_enroll"
+        assert speakers[0].match.similarity is None
+        assert speakers[0].match.second_similarity is None
+        assert speakers[0].match.margin is None
         assert fp.list_all() == []
+    finally:
+        store.close()
+
+
+def test_fingerprint_diagnostics_preserve_exact_cosine_floor(tmp_path):
+    db = tmp_path / "undertone.db"
+    store = TranscriptStore(db)
+    try:
+        fp = SpeakerFingerprintStore(db)
+        _, plan = fp.assign_fingerprints(
+            [Speaker(speaker_id="A", embedding=[1.0, 0.0])],
+            persist=False,
+            speaker_durations_ms={"A": 30_000},
+        )
+        plan.commit()
+
+        speakers, plan = fp.assign_fingerprints(
+            [Speaker(speaker_id="OPPOSITE", embedding=[-1.0, 0.0])],
+            persist=False,
+            speaker_durations_ms={"OPPOSITE": 2_000},
+        )
+        plan.commit()
+
+        assert speakers[0].fingerprint_id is None
+        assert speakers[0].match is not None
+        assert speakers[0].match.kind == "no_enroll"
+        assert speakers[0].match.similarity == -1.0
+        assert speakers[0].match.second_similarity is None
+        assert speakers[0].match.margin is None
     finally:
         store.close()
 

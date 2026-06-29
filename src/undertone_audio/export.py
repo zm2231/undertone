@@ -43,12 +43,22 @@ def render_transcript(
                 speakers=transcript.speakers,
                 segments=transcript.segments,
                 engine=transcript.metadata.engine,
-            )
-        return json.dumps(_raw_payload(raw, detail_level), separators=(",", ":"), default=str)
+        )
+        return json.dumps(
+            _raw_payload(raw, detail_level, enriched_speakers=transcript.speakers),
+            separators=(",", ":"),
+            default=str,
+        )
     if fmt == "jsonl":
+        speakers = {speaker.speaker_id: speaker for speaker in transcript.speakers}
         return "\n".join(
             json.dumps(
-                _segment_payload(transcript.transcript_id, segment, detail_level),
+                _segment_payload(
+                    transcript.transcript_id,
+                    segment,
+                    detail_level,
+                    speaker=speakers.get(segment.speaker_id),
+                ),
                 default=str,
                 separators=(",", ":"),
             )
@@ -82,6 +92,10 @@ def _speaker_name(transcript: EnrichedTranscript, speaker_id: str) -> str:
     return speaker_id
 
 
+def _speaker_by_id(transcript: EnrichedTranscript, speaker_id: str):
+    return next((speaker for speaker in transcript.speakers if speaker.speaker_id == speaker_id), None)
+
+
 def _transcript_payload(transcript: EnrichedTranscript, detail: str) -> dict[str, Any]:
     payload = transcript.model_dump(mode="json")
     if detail == "full":
@@ -113,21 +127,37 @@ def _transcript_payload(transcript: EnrichedTranscript, detail: str) -> dict[str
     return payload
 
 
-def _raw_payload(raw: RawTranscript, detail: str) -> dict[str, Any]:
+def _raw_payload(
+    raw: RawTranscript,
+    detail: str,
+    *,
+    enriched_speakers: list | None = None,
+) -> dict[str, Any]:
+    enriched_by_id = {speaker.speaker_id: speaker for speaker in enriched_speakers or []}
     payload: dict[str, Any] = {
         "duration_ms": raw.duration_ms,
         "language": raw.language,
         "engine": raw.engine,
-        "speakers": [
-            {
-                key: value
-                for key, value in speaker.model_dump(mode="json").items()
-                if value is not None and (detail == "full" or key not in {"embedding"})
-            }
-            for speaker in raw.speakers
-        ],
+        "speakers": [],
         "segments": [],
     }
+    for speaker in raw.speakers:
+        speaker_payload = speaker.model_dump(mode="json")
+        enriched = enriched_by_id.get(speaker.speaker_id)
+        if enriched is not None:
+            enriched_payload = enriched.model_dump(mode="json")
+            for key in ("fingerprint_id", "display_name", "match"):
+                if enriched_payload.get(key) is not None:
+                    speaker_payload[key] = enriched_payload[key]
+            if detail == "full" and enriched_payload.get("embedding") is not None:
+                speaker_payload["embedding"] = enriched_payload["embedding"]
+        payload["speakers"].append(
+            {
+                key: value
+                for key, value in speaker_payload.items()
+                if value is not None and (detail == "full" or key not in {"embedding"})
+            }
+        )
     for segment in raw.segments:
         row = {
             "segment_id": segment.segment_id,
@@ -146,7 +176,7 @@ def _raw_payload(raw: RawTranscript, detail: str) -> dict[str, Any]:
     return payload
 
 
-def _segment_payload(transcript_id: str, segment, detail: str) -> dict[str, Any]:
+def _segment_payload(transcript_id: str, segment, detail: str, *, speaker=None) -> dict[str, Any]:
     payload = {
         "transcript_id": transcript_id,
         "segment_id": segment.segment_id,
@@ -157,6 +187,19 @@ def _segment_payload(transcript_id: str, segment, detail: str) -> dict[str, Any]
         "asr_confidence": segment.asr_confidence,
         "diarization_quality": segment.diarization_quality,
     }
+    if speaker is not None:
+        payload["speaker_fingerprint_id"] = speaker.fingerprint_id
+        payload["speaker_display_name"] = speaker.display_name
+        payload["speaker_match_kind"] = speaker.match.kind if speaker.match else None
+        payload["speaker_match_similarity"] = speaker.match.similarity if speaker.match else None
+        payload["speaker_match_second_similarity"] = (
+            speaker.match.second_similarity if speaker.match else None
+        )
+        payload["speaker_match_margin"] = speaker.match.margin if speaker.match else None
+        payload["speaker_match_similarity_threshold"] = (
+            speaker.match.similarity_threshold if speaker.match else None
+        )
+        payload["speaker_match_embedding_model"] = speaker.match.embedding_model if speaker.match else None
     if detail == "full":
         payload["words"] = [word.model_dump(mode="json") for word in segment.words]
         payload["enrichment"] = segment.enrichment.model_dump(mode="json")
@@ -263,6 +306,13 @@ def _render_csv(transcript: EnrichedTranscript, detail: str) -> str:
         "transcript_id",
         "speaker_id",
         "speaker_name",
+        "fingerprint_id",
+        "match_kind",
+        "match_similarity",
+        "match_second_similarity",
+        "match_margin",
+        "match_similarity_threshold",
+        "match_embedding_model",
         "talk_time_ms",
         "talk_ratio",
         "word_count",
@@ -288,10 +338,19 @@ def _render_csv(transcript: EnrichedTranscript, detail: str) -> str:
     writer = csv.DictWriter(buffer, fieldnames=fields)
     writer.writeheader()
     for metric in transcript.speaker_metrics:
+        speaker = _speaker_by_id(transcript, metric.speaker_id)
+        match = speaker.match if speaker else None
         row = {
             "transcript_id": transcript.transcript_id,
             "speaker_id": metric.speaker_id,
             "speaker_name": _speaker_name(transcript, metric.speaker_id),
+            "fingerprint_id": speaker.fingerprint_id if speaker else None,
+            "match_kind": match.kind if match else None,
+            "match_similarity": match.similarity if match else None,
+            "match_second_similarity": match.second_similarity if match else None,
+            "match_margin": match.margin if match else None,
+            "match_similarity_threshold": match.similarity_threshold if match else None,
+            "match_embedding_model": match.embedding_model if match else None,
             "talk_time_ms": metric.talk_time_ms,
             "talk_ratio": metric.talk_ratio,
             "word_count": metric.word_count,

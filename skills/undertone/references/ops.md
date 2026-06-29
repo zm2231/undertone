@@ -68,7 +68,7 @@ undertone --db ./undertone.db relabel meeting-1
 undertone --db ./undertone.db delete meeting-1 --yes
 ```
 
-`reenrich` rebuilds enrichment from the saved `RawTranscript` without retranscribing audio; use it after changing thresholds or feature toggles. `relabel` re-stamps saved speaker display names from the fingerprint DB without ASR or enrichment. `delete` removes a saved transcript and requires `--yes` to proceed.
+`reenrich` rebuilds enrichment from the saved `RawTranscript` without retranscribing audio; use it after changing thresholds or feature toggles. It re-runs fingerprint matching against today's fingerprint centroids. `relabel` re-stamps saved speaker display names from the fingerprint DB without ASR, enrichment, or fingerprint matching. `delete` removes a saved transcript and requires `--yes` to proceed.
 
 For speaker fingerprint operations (label, relabel, list/excerpts, discard/restore/destroy, export/import, merge, and embedding-model adoption), see `references/fingerprints.md`. For version upgrades and cross-DB fingerprint portability, see `references/upgrades.md`.
 

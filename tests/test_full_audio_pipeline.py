@@ -169,13 +169,32 @@ def test_output_formats_render_expected_shapes(tmp_path):
     finally:
         store.close()
 
-    assert json.loads(render_transcript(transcript, "json"))["transcript_id"] == "formats"
-    assert json.loads(render_transcript(transcript, "raw-json"))["engine"] == "fluidaudio-hybrid"
+    json_payload = json.loads(render_transcript(transcript, "json"))
+    assert json_payload["transcript_id"] == "formats"
+    json_speakers = {speaker["speaker_id"]: speaker for speaker in json_payload["speakers"]}
+    assert json_speakers["S1"]["embedding"] == [1.0, 0.0]
+    assert json_speakers["S1"]["match"]["kind"] == "no_enroll"
+    raw_payload = json.loads(render_transcript(transcript, "raw-json"))
+    assert raw_payload["engine"] == "fluidaudio-hybrid"
+    raw_speakers = {speaker["speaker_id"]: speaker for speaker in raw_payload["speakers"]}
+    assert raw_speakers["S1"]["match"]["kind"] == "no_enroll"
     assert "SPEAKERS" in render_transcript(transcript, "text")
     assert "## Transcript" in render_transcript(transcript, "md")
     rows = [json.loads(line) for line in render_transcript(transcript, "jsonl").splitlines()]
     assert rows[0]["segment_id"] == "a"
     assert rows[0]["enrichment"]["fillers"] == ["um"]
+    assert rows[0]["speaker_match_kind"] == "no_enroll"
+    assert rows[0]["speaker_match_similarity"] is None
+    assert rows[0]["speaker_match_second_similarity"] is None
+    assert rows[0]["speaker_match_margin"] is None
+    assert rows[0]["speaker_match_similarity_threshold"] == 0.78
+    assert rows[0]["speaker_match_embedding_model"] == "FluidAudio pyannote-derived speaker embeddings"
+    csv_payload = render_transcript(transcript, "csv")
+    assert (
+        "fingerprint_id,match_kind,match_similarity,match_second_similarity,"
+        "match_margin,match_similarity_threshold,match_embedding_model"
+    ) in csv_payload
+    assert ",no_enroll,,,,0.78,FluidAudio pyannote-derived speaker embeddings," in csv_payload
 
 
 def test_output_detail_profiles_control_exported_metrics(tmp_path):

@@ -39,11 +39,29 @@ class Word(BaseModel):
     confidence: float | None = None
 
 
+class FingerprintMatch(BaseModel):
+    kind: Literal[
+        "strong",
+        "margin",
+        "new",
+        "no_enroll",
+        "name_match",
+        "preassigned",
+        "no_embedding",
+    ]
+    similarity: float | None = None
+    second_similarity: float | None = None
+    margin: float | None = None
+    similarity_threshold: float | None = None
+    embedding_model: str | None = None
+
+
 class Speaker(BaseModel):
     speaker_id: str
     fingerprint_id: str | None = None
     display_name: str | None = None
     embedding: list[float] | None = None
+    match: FingerprintMatch | None = None
 
 
 class LinguisticFeatures(BaseModel):

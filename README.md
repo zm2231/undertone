@@ -160,7 +160,7 @@ undertone --db ./undertone.db relabel --all
 undertone --db ./undertone.db fingerprint-adopt-model --dry-run
 ```
 
-`relabel` (alias `resolve-names`) re-stamps saved transcript speaker names from the voice fingerprint DB without ASR, diarization, or enrichment. Use it after naming a voice to update old exports.
+`relabel` (alias `resolve-names`) re-stamps saved transcript speaker names from the voice fingerprint DB without ASR, diarization, enrichment, or fingerprint matching. Use it after naming a voice to update old exports. `reenrich` is the heavier maintenance command: it rebuilds enrichment from the saved raw transcript without retranscribing audio, and re-runs matching against today's fingerprint centroids.
 
 Inspect effective model and backend selections:
 
@@ -221,6 +221,10 @@ undertone --db ./undertone.db fingerprint-adopt-model --yes
 `fingerprint-adopt-model` is a provenance assertion for existing vectors, not a cross-model conversion. Use it only when the stored vectors were actually produced by the target model. A true model migration requires rerunning audio to rebuild embeddings.
 
 Ingest commands fail instead of silently overwriting an existing transcript id. Pass `--force` to overwrite or `--skip-existing` to no-op when the target id already exists.
+
+Use `--expected-speaker-count` only when the true speaker count is known. It is a diarization hint, not a merge or de-duplication knob; sponsor reads, ad voices, brief guests, and short co-speakers can be legitimate distinct speakers. For a spurious split of the same person, tune `--fingerprint-similarity-threshold` or use `fingerprint-merge`.
+
+Transcript speakers include a nullable `match` object with the fingerprint decision category (`strong`, `margin`, `new`, `no_enroll`, `name_match`, `preassigned`, or `no_embedding`) plus diagnostic similarity values. `match.kind` is the stable signal; similarity numbers are model/config dependent, and absent comparisons are reported as `null` rather than fabricated zeroes. `Speaker.embedding` remains the supported per-transcript speaker centroid output contract.
 
 Long-running ingest commands support JSON progress events on stderr:
 
@@ -409,7 +413,7 @@ undertone --db ./undertone.db run-wav ./meeting.wav --output-format text --outpu
 Formats:
 
 - `json`: enriched transcript
-- `raw-json`: pre-enrichment raw transcript
+- `raw-json`: raw transcript segments plus current speaker attribution fields (`fingerprint_id`, `display_name`, and `match`) when available
 - `jsonl`: one segment per line
 - `csv`: speaker metrics table
 - `text`: readable speaker summary and transcript

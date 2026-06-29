@@ -6,7 +6,7 @@ import sqlite3
 import struct
 from pathlib import Path
 
-from undertone_audio.schema import Speaker
+from undertone_audio.schema import FingerprintMatch, Speaker
 
 log = logging.getLogger(__name__)
 
@@ -102,7 +102,16 @@ class SpeakerFingerprintStore:
 
         for speaker in speakers:
             if speaker.fingerprint_id:
-                updated.append(speaker)
+                updated.append(
+                    speaker.model_copy(
+                        update={
+                            "match": FingerprintMatch(
+                                kind="preassigned",
+                                embedding_model=self.embedding_model,
+                            )
+                        }
+                    )
+                )
                 continue
 
             if not speaker.embedding:
@@ -117,31 +126,62 @@ class SpeakerFingerprintStore:
                         None,
                     )
                     if name_match:
-                        updated.append(speaker.model_copy(update={"fingerprint_id": name_match}))
+                        updated.append(
+                            speaker.model_copy(
+                                update={
+                                    "fingerprint_id": name_match,
+                                    "match": FingerprintMatch(
+                                        kind="name_match",
+                                        embedding_model=self.embedding_model,
+                                    ),
+                                }
+                            )
+                        )
                         continue
-                updated.append(speaker)
+                updated.append(
+                    speaker.model_copy(
+                        update={
+                            "match": FingerprintMatch(
+                                kind="no_embedding",
+                                embedding_model=self.embedding_model,
+                            )
+                        }
+                    )
+                )
                 continue
 
             best_id = None
-            best_similarity = 0.0
+            best_similarity = None
             best_name = None
-            second_similarity = 0.0
+            second_id = None
+            second_similarity = None
             for fingerprint_id, vector, _count, display_name in stored:
                 similarity = _cosine(speaker.embedding, vector)
-                if similarity > best_similarity:
+                if best_similarity is None or similarity > best_similarity:
+                    second_id = best_id
                     second_similarity = best_similarity
                     best_id = fingerprint_id
                     best_similarity = similarity
                     best_name = display_name
-                elif similarity > second_similarity:
+                elif second_similarity is None or similarity > second_similarity:
+                    second_id = fingerprint_id
                     second_similarity = similarity
 
             duration_ms = durations.get(speaker.speaker_id)
-            strong_match = best_id is not None and best_similarity >= self.similarity_threshold
+            decision_best_similarity = max(best_similarity or 0.0, 0.0)
+            decision_second_similarity = max(second_similarity, 0.0) if second_id is not None else 0.0
+            strong_match = (
+                best_id is not None and decision_best_similarity >= self.similarity_threshold
+            )
             margin_match = (
                 best_id is not None
-                and best_similarity >= MARGIN_SIMILARITY_THRESHOLD
-                and (best_similarity - second_similarity) >= MARGIN_DELTA
+                and decision_best_similarity >= MARGIN_SIMILARITY_THRESHOLD
+                and (decision_best_similarity - decision_second_similarity) >= MARGIN_DELTA
+            )
+            reported_similarity = best_similarity
+            reported_second_similarity = second_similarity if second_id is not None else None
+            reported_margin = (
+                best_similarity - second_similarity if second_id is not None else None
             )
 
             if strong_match or margin_match:
@@ -151,11 +191,20 @@ class SpeakerFingerprintStore:
                 long_enough = duration_ms is None or duration_ms >= MIN_UPDATE_DURATION_MS
                 if strong_match and long_enough:
                     plan.matches.append((best_id, list(speaker.embedding)))
+                match = FingerprintMatch(
+                    kind="strong" if strong_match else "margin",
+                    similarity=reported_similarity,
+                    second_similarity=reported_second_similarity,
+                    margin=reported_margin,
+                    similarity_threshold=self.similarity_threshold,
+                    embedding_model=self.embedding_model,
+                )
                 updated.append(
                     speaker.model_copy(
                         update={
                             "fingerprint_id": best_id,
                             "display_name": speaker.display_name or best_name,
+                            "match": match,
                         }
                     )
                 )
@@ -163,8 +212,8 @@ class SpeakerFingerprintStore:
                     "matched %s -> %s (sim=%.3f, 2nd=%.3f, %s%s)",
                     speaker.speaker_id,
                     best_id,
-                    best_similarity,
-                    second_similarity,
+                    decision_best_similarity,
+                    decision_second_similarity,
                     "strong" if strong_match else "margin",
                     "" if (strong_match and long_enough) else ", no-fold",
                 )
@@ -174,13 +223,26 @@ class SpeakerFingerprintStore:
             # too little signal (the garbage-magnet source). Leave such speakers
             # unassigned rather than creating a junk fingerprint.
             if duration_ms is not None and duration_ms < MIN_ENROLL_DURATION_MS:
-                updated.append(speaker)
+                updated.append(
+                    speaker.model_copy(
+                        update={
+                            "match": FingerprintMatch(
+                                kind="no_enroll",
+                                similarity=reported_similarity,
+                                second_similarity=reported_second_similarity,
+                                margin=reported_margin,
+                                similarity_threshold=self.similarity_threshold,
+                                embedding_model=self.embedding_model,
+                            )
+                        }
+                    )
+                )
                 log.info(
                     "no-enroll %s (talk=%dms < %dms, best existing sim=%.3f)",
                     speaker.speaker_id,
                     duration_ms,
                     MIN_ENROLL_DURATION_MS,
-                    best_similarity,
+                    decision_best_similarity,
                 )
                 continue
 
@@ -195,13 +257,27 @@ class SpeakerFingerprintStore:
                     len(speaker.embedding),
                 )
             )
-            updated.append(speaker.model_copy(update={"fingerprint_id": fingerprint_id}))
+            updated.append(
+                speaker.model_copy(
+                    update={
+                        "fingerprint_id": fingerprint_id,
+                        "match": FingerprintMatch(
+                            kind="new",
+                            similarity=reported_similarity,
+                            second_similarity=reported_second_similarity,
+                            margin=reported_margin,
+                            similarity_threshold=self.similarity_threshold,
+                            embedding_model=self.embedding_model,
+                        ),
+                    }
+                )
+            )
             stored.append((fingerprint_id, list(speaker.embedding), 1, speaker.display_name))
             log.info(
                 "new fingerprint %s for %s (best existing sim=%.3f)",
                 fingerprint_id,
                 speaker.speaker_id,
-                best_similarity,
+                decision_best_similarity,
             )
 
         if persist:
