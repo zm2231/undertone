@@ -14,7 +14,7 @@ pip install -e '.[voice,pyannote,meet,connectors]'
 ```
 
 Use `.[voice]` for Parselmouth acoustic metrics. Use `.[meet]` for Google Meet API/Drive credential support.
-Use `.[connectors]` for the YouTube connector's `yt-dlp` dependency.
+Use `.[connectors]` for the YouTube and web media resolver `yt-dlp` dependency.
 Use `.[pyannote]` only when the `fluidaudio-pyannote` engine is needed. A base install should not pull torch/pyannote.
 Google Meet auth uses Google Cloud CLI Application Default Credentials. Configure it with:
 
@@ -39,6 +39,7 @@ undertone --db ./undertone.db models
 undertone --db ./undertone.db doctor
 undertone --db ./undertone.db doctor --all
 undertone --db ./undertone.db doctor --check-pyannote
+undertone --db ./undertone.db doctor --check-yt-dlp --yt-dlp-bin /path/to/yt-dlp
 undertone --db ./undertone.db sources
 undertone --db ./undertone.db stats
 undertone --db ./undertone.db fingerprints
@@ -47,6 +48,7 @@ undertone --db ./undertone.db fingerprints --unnamed --excerpts
 undertone --db ./undertone.db fingerprints --status all
 undertone schema transcript
 undertone schema connector-asset
+undertone schema connector-candidate
 undertone connector-list
 undertone --db ./undertone.db search "follow up"
 ```

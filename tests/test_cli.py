@@ -1977,6 +1977,49 @@ def test_cli_doctor_reports_checks(tmp_path, monkeypatch, capsys):
         "meet",
         "quill",
     }
+    yt_dlp_check = next(check for check in payload["checks"] if check["name"] == "yt_dlp")
+    assert yt_dlp_check["binary"] == "yt-dlp"
+    assert yt_dlp_check["path"] == "/usr/bin/yt-dlp"
+
+
+def test_cli_doctor_uses_custom_yt_dlp_binary(tmp_path, monkeypatch, capsys):
+    seen = []
+
+    class FakeEngine:
+        cli_path = "/tmp/fluidaudiocli"
+
+        async def healthcheck(self):
+            return True
+
+    def fake_which(name):
+        seen.append(name)
+        return "/custom/yt-dlp" if name == "custom-yt-dlp" else None
+
+    monkeypatch.setattr(
+        "undertone_audio.commands.ops.create_engine", lambda name, config: FakeEngine()
+    )
+    monkeypatch.setattr("undertone_audio.commands.ops.shutil.which", fake_which)
+
+    assert (
+        main(
+            [
+                "--db",
+                str(tmp_path / "undertone.db"),
+                "doctor",
+                "--check-yt-dlp",
+                "--yt-dlp-bin",
+                "custom-yt-dlp",
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    yt_dlp_check = next(check for check in payload["checks"] if check["name"] == "yt_dlp")
+    assert seen[-1] == "custom-yt-dlp"
+    assert yt_dlp_check["binary"] == "custom-yt-dlp"
+    assert yt_dlp_check["path"] == "/custom/yt-dlp"
 
 
 def test_cli_doctor_reports_pyannote_readiness(tmp_path, monkeypatch, capsys):

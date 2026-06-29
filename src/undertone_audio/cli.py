@@ -44,7 +44,9 @@ _COMMAND_GROUPS: list[tuple[str, list[str]]] = [
         [
             "youtube-ingest",
             "connector-list",
+            "connector-resolve",
             "connector-ingest",
+            "web-ingest",
             "podcast-list",
             "podcast-ingest",
             "quill-list",

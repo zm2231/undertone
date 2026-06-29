@@ -45,7 +45,7 @@ Each transcript is stored with three layers.
 - macOS on Apple Silicon
 - Python 3.11+
 - `fluidaudiocli`, built from [FluidInference/FluidAudio](https://github.com/FluidInference/FluidAudio) (see [Install](#install)). FluidAudio is a Swift SDK for on-device audio AI using Core ML and the Apple Neural Engine. Undertone does not vendor it; it shells out to the CLI that FluidAudio builds.
-- `yt-dlp`, only for the YouTube connector
+- `yt-dlp`, for the YouTube connector and arbitrary web media resolution
 - Google Application Default Credentials, only for Google Meet
 - A local Quill database and recordings, only for Quill ingest
 
@@ -89,7 +89,7 @@ Optional extras:
 pip install 'undertone-audio[voice]'       # Parselmouth acoustic metrics
 pip install 'undertone-audio[pyannote]'    # Optional pyannote diarization backend
 pip install 'undertone-audio[meet]'        # Google Meet auth helpers
-pip install 'undertone-audio[connectors]'  # YouTube connector via yt-dlp
+pip install 'undertone-audio[connectors]'  # YouTube + web media resolution via yt-dlp
 pip install 'undertone-audio[voice,pyannote,meet,connectors]'
 ```
 
@@ -107,6 +107,7 @@ command -v fluidaudiocli
 undertone --help
 undertone models
 undertone doctor
+undertone doctor --check-yt-dlp --yt-dlp-bin /path/to/yt-dlp
 ```
 
 If you installed the optional pyannote backend, check that its Python dependency imports:
@@ -177,6 +178,8 @@ Connectors can also be installed as Python entry-point plugins under the `undert
 ```bash
 undertone connector-list
 undertone --db ./undertone.db connector-ingest 'https://www.youtube.com/watch?v=...'
+undertone connector-resolve 'https://example.com/article-with-audio' --json
+undertone --db ./undertone.db web-ingest 'https://example.com/article-with-audio' --list
 ```
 
 First-party compatibility commands such as `youtube-ingest` and `podcast-ingest` remain available.
@@ -229,14 +232,15 @@ Stdout and `--output` remain reserved for transcript output.
 
 ## Schemas
 
-Undertone publishes JSON Schemas for the transcript contract and connector asset contract:
+Undertone publishes JSON Schemas for the transcript contract, connector asset contract, and connector candidate contract:
 
 ```bash
 undertone schema transcript --output ./undertone-transcript.schema.json
 undertone schema connector-asset --output ./undertone-connector-asset.schema.json
+undertone schema connector-candidate --output ./undertone-connector-candidate.schema.json
 ```
 
-The transcript schema is versioned by `schema_version`. Connector plugins exchange `ConnectorAsset` shape version `1`.
+The transcript schema is versioned by `schema_version`. Connector plugins exchange `ConnectorAsset` shape version `1`; web media resolution exposes `ConnectorCandidate` shape version `1`.
 
 ## Engines
 
@@ -324,7 +328,25 @@ UNDERTONE_WEBHOOK_ENABLED=0 undertone --db ./undertone.db youtube-ingest \
   --output ./youtube.json
 ```
 
-Flags: `--yt-dlp-bin` (non-default binary), `--audio-format wav`, `--include-playlist`, `--dry-run` (select media and print metadata without ingesting). Downloads are published only after a completed transfer; interrupted downloads do not leave reusable media files behind.
+Flags: `--yt-dlp-bin` (non-default binary), `--audio-format wav`, `--include-playlist`, `--dry-run` (download the connector asset and print metadata without transcribing). `youtube-ingest` accepts only YouTube hosts; use `web-ingest` for article pages or arbitrary web URLs. Downloads are published only after a completed transfer; interrupted downloads do not leave reusable media files behind.
+
+### Web media
+
+Use web media ingest for content/article pages where yt-dlp must resolve the actual audio source first, such as a newsletter post that embeds an audio player and links to YouTube.
+
+```bash
+undertone connector-resolve 'https://example.com/article-with-audio'
+undertone connector-resolve 'https://example.com/article-with-audio' --json
+undertone --db ./undertone.db web-ingest 'https://example.com/article-with-audio' --list
+undertone --db ./undertone.db web-ingest 'https://example.com/article-with-audio' --select <candidate-id>
+undertone --db ./undertone.db web-ingest 'https://example.com/article-with-audio' --yes
+```
+
+`connector-resolve` and `web-ingest --list` are metadata-only previews and do not download media. They print ranked candidates with stable `candidate_id`, source kind, availability, extractor, title, URL, and duration. Ranking prefers non-voiceover real media, then the longest duration. If more than one downloadable candidate is found, `web-ingest` requires `--select <candidate-id>`; `--yes` only skips confirmation for a single downloadable candidate.
+
+Only candidates with a concrete media URL or extractor URL are marked downloadable. If yt-dlp reports multiple article-page entries that all point back to the same article URL, Undertone lists them as not directly downloadable instead of pretending `--select` can pin a recording.
+
+For arbitrary web URLs, Undertone preflights localhost/private-network user URLs and selected candidate media URLs before download, applies the process timeout, and maps the Undertone `--max-download-size` option (`UNDERTONE_MAX_DOWNLOAD_SIZE` or `2G` by default) to yt-dlp `--max-filesize`. Auth/cookies are explicit only via `--cookies` or `--cookies-from-browser`; Undertone invokes yt-dlp with `--ignore-config` so ambient yt-dlp config is not loaded. yt-dlp performs its own DNS, redirects, extractor logic, and network I/O after Undertone's preflight checks. Treat `web-ingest` as a local trusted-URL tool; do not expose it as a hosted/server-side fetch endpoint without an external egress sandbox or network policy.
 
 ### Podcasts
 

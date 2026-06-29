@@ -48,6 +48,7 @@ undertone = "undertone_audio.cli:main"
 [project.entry-points."undertone.connectors"]
 youtube = "undertone_audio.connectors.youtube:YouTubeConnector"
 podcast = "undertone_audio.connectors.podcast:PodcastConnector"
+web = "undertone_audio.connectors.web:WebMediaConnector"
 
 [project.optional-dependencies]
 dev = [

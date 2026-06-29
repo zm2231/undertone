@@ -1,6 +1,7 @@
 from undertone_audio.pipeline import AudioPipeline
 from undertone_audio.schema import (
     ConnectorAssetSchema,
+    ConnectorCandidateSchema,
     EnrichedTranscript,
     LinguisticFeatures,
     MeetingType,
@@ -16,6 +17,7 @@ from undertone_audio.schema import (
 __all__ = [
     "AudioPipeline",
     "ConnectorAssetSchema",
+    "ConnectorCandidateSchema",
     "EnrichedTranscript",
     "LinguisticFeatures",
     "MeetingType",

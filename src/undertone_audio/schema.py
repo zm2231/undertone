@@ -154,3 +154,32 @@ class ConnectorAssetSchema(BaseModel):
     transcript_id_hint: str | None = None
     recorded_at: str | None = None
     metadata: dict = Field(default_factory=dict)
+
+
+class ConnectorCandidateSchema(BaseModel):
+    schema_version: Literal["1"] = "1"
+    candidate_id: str
+    extractor: str | None = None
+    extractor_key: str | None = None
+    webpage_url: str | None = None
+    original_url: str
+    url: str | None = None
+    media_id: str | None = None
+    format_id: str | None = None
+    title: str | None = None
+    duration: float | None = None
+    kind: Literal[
+        "page-voiceover",
+        "external-video",
+        "podcast-enclosure",
+        "generic-media",
+        "unsupported",
+    ] = "generic-media"
+    availability: Literal[
+        "downloadable",
+        "requires-auth",
+        "found-but-unavailable",
+        "unsupported",
+    ] = "downloadable"
+    reason: str | None = None
+    metadata: dict = Field(default_factory=dict)

@@ -4,13 +4,15 @@ import argparse
 import asyncio
 import json
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 
 from undertone_audio.commands.common import config_for_args, db_path
 from undertone_audio.engines import create_engine
 from undertone_audio.engines.fluidaudio_pyannote import pyannote_status
 from undertone_audio.pipeline import effective_fingerprint_embedding_model
-from undertone_audio.schema import ConnectorAssetSchema, EnrichedTranscript
+from undertone_audio.processes import run_process_sync
+from undertone_audio.schema import ConnectorAssetSchema, ConnectorCandidateSchema, EnrichedTranscript
 from undertone_audio.source_readiness import source_statuses
 from undertone_audio.sources.meet import meet_auth_check
 from undertone_audio.storage import TranscriptStore
@@ -39,7 +41,7 @@ def register(subcommands: argparse._SubParsersAction) -> None:
     schema = subcommands.add_parser("schema", help="Print published JSON Schemas.")
     schema.add_argument(
         "name",
-        choices=["transcript", "connector-asset"],
+        choices=["transcript", "connector-asset", "connector-candidate"],
         nargs="?",
         default="transcript",
     )
@@ -48,6 +50,7 @@ def register(subcommands: argparse._SubParsersAction) -> None:
 
     doctor = subcommands.add_parser("doctor", help="Run local undertone preflight checks.")
     doctor.add_argument("--check-yt-dlp", action="store_true")
+    doctor.add_argument("--yt-dlp-bin", default="yt-dlp", help="yt-dlp binary name/path for --check-yt-dlp.")
     doctor.add_argument("--check-meet", action="store_true")
     doctor.add_argument("--check-pyannote", action="store_true")
     doctor.add_argument("--all", action="store_true", help="Check all optional integrations.")
@@ -155,7 +158,12 @@ def sources_cmd(args: argparse.Namespace) -> int:
 
 
 def schema_cmd(args: argparse.Namespace) -> int:
-    model = EnrichedTranscript if args.name == "transcript" else ConnectorAssetSchema
+    models = {
+        "transcript": EnrichedTranscript,
+        "connector-asset": ConnectorAssetSchema,
+        "connector-candidate": ConnectorCandidateSchema,
+    }
+    model = models[args.name]
     payload = model.model_json_schema()
     body = json.dumps(payload, indent=2)
     if args.output:
@@ -235,12 +243,15 @@ def doctor_cmd(args: argparse.Namespace) -> int:
         )
         ok = False
     if args.check_yt_dlp or args.all:
-        path = shutil.which("yt-dlp")
+        path = shutil.which(args.yt_dlp_bin)
+        yt_dlp_detail = _yt_dlp_version_detail(path) if path else {}
         checks.append(
             {
                 "name": "yt_dlp",
                 "ok": path is not None,
+                "binary": args.yt_dlp_bin,
                 "path": path,
+                **yt_dlp_detail,
                 "fix": None
                 if path
                 else "Install connectors with `pip install -e '.[connectors]'` or pass --yt-dlp-bin.",
@@ -356,10 +367,34 @@ def _render_sources(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _yt_dlp_version_detail(path: str | None) -> dict:
+    if not path:
+        return {}
+    try:
+        result = run_process_sync([path, "--version"], label="yt-dlp", timeout_seconds=15)
+    except Exception as exc:
+        return {"version": None, "stale": None, "detail": f"version check failed: {exc}"}
+    version = str(result.stdout).strip()
+    stale = _is_stale_yt_dlp_version(version)
+    detail = "version may be stale; update yt-dlp if site extraction fails" if stale else None
+    return {"version": version, "stale": stale, "detail": detail}
+
+
+def _is_stale_yt_dlp_version(version: str) -> bool | None:
+    if len(version) < 8 or not version[:8].isdigit():
+        return None
+    try:
+        release = datetime.strptime(version[:8], "%Y%m%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return (datetime.now(timezone.utc) - release).days > 120
+
+
 def _check_detail(check: dict) -> str:
     parts = []
     for key in (
         "path",
+        "binary",
         "engine",
         "fluidaudio_cli",
         "model",
